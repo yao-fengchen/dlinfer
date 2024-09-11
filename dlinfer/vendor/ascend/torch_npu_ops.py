@@ -1,8 +1,17 @@
 # Copyright (c) 2024, DeepLink. All rights reserved.
 import math
 import torch
+import torch.nn.functional as F
 import torch_npu
 
+import json
+from typing import List
+from dataclasses import dataclass, asdict
+
+torch.classes.load_library(
+    "/data2/yaofengchen/workspaces/dlinfer_dev/atb_models/output/atb_speed/lib/libatb_speed_torch.so"
+)
+atb_op = torch.classes.OperationTorch.OperationTorch("ATB")
 from dlinfer.vendor import vendor_ops_registry
 from dlinfer.utils.registry import register_ops
 from dlinfer.utils.type_annotation import Tensor, Optional, Sequence, Tuple
@@ -33,6 +42,12 @@ def add_rms_norm(
     return normed_hidden_states, added_hidden_states
 
 
+@dataclass
+class RotaryParams:
+    rotaryCoeff: int = 2
+    name: str = "RopeOperation"
+
+
 @register_ops(vendor_ops_registry)
 def apply_rotary_pos_emb(
     query: Tensor,
@@ -48,7 +63,108 @@ def apply_rotary_pos_emb(
         sin = sin.unsqueeze(2)
     query = query.contiguous()
     key = key.contiguous()
-    return torch.ops.npu.npu_apply_rotary_pos_emb(query, key, cos, sin, "BSND")
+    torch.cuda.synchronize()
+    bsz, seq_len, num_q_heads, head_dim = query.shape
+    _, _, num_kv_heads, _ = key.shape
+    query = query.view(bsz * seq_len, num_q_heads * head_dim)
+    key = key.view(bsz * seq_len, num_kv_heads * head_dim)
+    cos = cos.view(bsz * seq_len, head_dim)
+    sin = sin.view(bsz * seq_len, head_dim)
+    seq_len = torch.tensor([seq_len], dtype=torch.int32).cuda()
+    params = RotaryParams(rotaryCoeff=2)
+    atb_op.set_op_name("RopeOperation")
+    atb_op.set_param(json.dumps(params.__dict__))
+    atb_op.execute_out([query, key, cos, sin, seq_len], [query, key])
+    ropeQ_atb = query.view(bsz, seq_len, num_q_heads, head_dim)
+    ropeK_atb = key.view(bsz, seq_len, num_kv_heads, head_dim)
+    torch.cuda.synchronize()
+    return ropeQ_atb, ropeK_atb
+    # return torch.ops.npu.npu_apply_rotary_pos_emb(query, key, cos, sin, "BSND")
+
+
+@dataclass
+class PagedAttentionPrefillParams:
+    headNum: int
+    kvHeadNum: int
+    qkScale: float = 1.0
+    qScale: float = 1.0
+    calcType: int = 3
+    kernelType: int = 1
+    clampType: int = 0
+    isTriuMask: int = 1
+    maskType: int = 0
+    name: str = "SelfAttentionOperation"
+
+
+def prefill_attention_atb(
+    query,
+    key,
+    value,
+    q_seq_len,
+    num_q_heads,
+    num_kv_heads,
+    attn_mask,
+    sm_scale,
+    attn_output,
+):
+    seq_len_list = [] if q_seq_len is None else q_seq_len.tolist()
+    atb_op.set_op_name("SelfAttentionOperation")
+    query_dim, value_dim = query.shape[-1], value.shape[-1]
+    value = F.pad(value, (0, query_dim - value_dim))
+    atb_output = torch.empty_like(query)
+    if attn_mask is not None:
+        params = PagedAttentionPrefillParams(
+            headNum=num_q_heads,
+            kvHeadNum=num_kv_heads,
+            qkScale=sm_scale if sm_scale else 1.0 / math.sqrt(query.shape[-1]),
+            qScale=1.0,
+            calcType=3,  # paged encode
+            kernelType=1,  # 1为高精度，0为默认
+            isTriuMask=1,  # triu mask
+            maskType=1,  # norm mask
+        )
+        if attn_mask.dtype != query.dtype:
+            attn_mask = attn_mask.to(query.dtype)
+        if q_seq_len.dtype != torch.int32:
+            q_seq_len = q_seq_len.to(torch.int32)
+        atb_op.set_param(json.dumps(params.__dict__))
+        query = query.view(-1, num_q_heads * query.shape[-1])
+        key = key.view(-1, num_kv_heads * key.shape[-1])
+        value = value.view(-1, num_kv_heads * value.shape[-1])
+        # mask要求f16/bf16, seq_len要求int32
+        atb_op.execute_out_with_param(
+            [query, key, value, attn_mask, q_seq_len],
+            [atb_output],
+            json.dumps(
+                {
+                    "seqLen": seq_len_list,
+                    "hasMask": True,
+                }
+            ),
+        )
+        torch.cuda.synchronize()
+    else:
+        params = PagedAttentionPrefillParams(
+            headNum=num_q_heads,
+            kvHeadNum=num_kv_heads,
+            qkScale=sm_scale if sm_scale else 1.0 / math.sqrt(query.shape[-1]),
+            qScale=1.0,
+            calcType=3,  # paged encode
+            maskType=0,  # norm mask
+        )
+        atb_op.set_param(json.dumps(params.__dict__))
+        atb_op.execute_out_with_param(
+            [query, key, value],
+            [atb_output],
+            json.dumps(
+                {
+                    "seqLen": seq_len_list,
+                    "hasMask": False,
+                }
+            ),
+        )
+    attn_output[:] = atb_output[..., :value_dim]
+    return attn_output
 
 
 @register_ops(vendor_ops_registry)
@@ -77,46 +193,71 @@ def prefill_attention(
     key = key.contiguous()
     value = value.contiguous()
 
-    if attn_mask:
-        batch = q_start_loc.shape[0]
-        scale_value = 1.0 / math.sqrt(query.shape[-1])
-        for i in range(batch):
-            start = q_start_loc[i]
-            end = start + seq_len_list[i]
-            single_seqlen = int(seq_len_list[i])
-            single_q = query[start:end].view(1, single_seqlen, -1)
-            single_k = key[start:end].reshape(1, single_seqlen, -1)
-            single_v = value[start:end].reshape(1, single_seqlen, -1)
-            single_o = attn_output[start:end].view(1, single_seqlen, -1)
-            actual_seq_lengths = seq_len_list[i : i + 1]
-            torch.ops.npu_ext.npu_prompt_flash_attention_out(
-                single_q,
-                single_k,
-                single_v,
-                single_o,
-                padding_mask=None,
-                atten_mask=attn_mask[i],
-                actual_seq_lengths=actual_seq_lengths,
-                num_heads=num_q_heads,
-                scale_value=scale_value,
-                pre_tokens=2147473647,
-                next_tokens=0,
-                input_layout="BSH",
-                num_key_value_heads=num_kv_heads,
-            )
-    else:
-        # For now, the value of attn_mask is None only in vit
-        scale_value = 1.0 / math.sqrt(query.shape[-1] // num_q_heads)
-        attn_output[:] = torch.ops.npu.npu_prompt_flash_attention(
-            query,
-            key,
-            value,
-            actual_seq_lengths=seq_len_list,
-            num_heads=num_q_heads,
-            scale_value=scale_value,
-            input_layout="BSH",
-            num_key_value_heads=num_kv_heads,
-        )
+    attn_output = prefill_attention_atb(
+        query,
+        key,
+        value,
+        q_seq_len,
+        num_q_heads,
+        num_kv_heads,
+        attn_mask,
+        softmax_scale,
+        attn_output,
+    )
+    # attn_qk_scale = softmax_scale if softmax_scale else 1.0 / math.sqrt(query.shape[-1])
+    # atb_self_attention(
+    #     query,
+    #     key,
+    #     value,
+    #     q_start_loc,
+    #     q_seq_len.to(query.device).to(torch.int32),
+    #     num_q_heads,
+    #     num_kv_heads,
+    #     attn_mask,
+    #     attn_qk_scale,
+    #     alibi_slopes,
+    #     attn_output,
+    # )
+    # if attn_mask is not None:
+    #     batch = q_start_loc.shape[0]
+    #     scale_value = 1.0 / math.sqrt(query.shape[-1])
+    #     for i in range(batch):
+    #         start = q_start_loc[i]
+    #         end = start + seq_len_list[i]
+    #         single_seqlen = int(seq_len_list[i])
+    #         single_q = query[start:end].view(1, single_seqlen, -1)
+    #         single_k = key[start:end].reshape(1, single_seqlen, -1)
+    #         single_v = value[start:end].reshape(1, single_seqlen, -1)
+    #         single_o = attn_output[start:end].view(1, single_seqlen, -1)
+    #         actual_seq_lengths = seq_len_list[i : i + 1]
+    #         torch.ops.npu_ext.npu_prompt_flash_attention_out(
+    #             single_q,
+    #             single_k,
+    #             single_v,
+    #             single_o,
+    #             padding_mask=None,
+    #             atten_mask=attn_mask[i],
+    #             actual_seq_lengths=actual_seq_lengths,
+    #             num_heads=num_q_heads,
+    #             scale_value=scale_value,
+    #             pre_tokens=2147473647,
+    #             next_tokens=0,
+    #             input_layout="BSH",
+    #             num_key_value_heads=num_kv_heads,
+    #         )
+    # else:
+    #     # For now, the value of attn_mask is None only in vit
+    #     scale_value = 1.0 / math.sqrt(query.shape[-1] // num_q_heads)
+    #     attn_output[:] = torch.ops.npu.npu_prompt_flash_attention(
+    #         query,
+    #         key,
+    #         value,
+    #         actual_seq_lengths=seq_len_list,
+    #         num_heads=num_q_heads,
+    #         scale_value=scale_value,
+    #         input_layout="BSH",
+    #         num_key_value_heads=num_kv_heads,
+    #     )
     return attn_output
 
 
@@ -128,7 +269,8 @@ def fill_kv_cache(
     value_cache: Tensor,
     kv_indices: Tensor,
 ) -> Tuple[Tensor, Tensor]:
-    head, dim = key.shape[1:]
+    head, key_dim = key.shape[1:]
+    value_dim = value_cache.shape[-1]
     block_num, block_size = key_cache.shape[:2]
     block_total = block_num * block_size
 
@@ -136,10 +278,11 @@ def fill_kv_cache(
     key = key.contiguous()
     value = value.contiguous()
 
-    key_cache_reshaped = key_cache.view(block_total, head, dim)
-    value_cache_reshaped = value_cache.view(block_total, head, dim)
+    key_cache_reshaped = key_cache.view(block_total, head, key_dim)
     torch.ops.npu.npu_scatter_nd_update_(key_cache_reshaped, kv_indices, key)
-    torch.ops.npu.npu_scatter_nd_update_(value_cache_reshaped, kv_indices, value)
+    if value_dim:
+        value_cache_reshaped = value_cache.view(block_total, head, key_dim)
+        torch.ops.npu.npu_scatter_nd_update_(value_cache_reshaped, kv_indices, value)
     return key_cache, value_cache
 
 
@@ -155,6 +298,55 @@ def fill_contiguous_kvcache(
 @register_ops(vendor_ops_registry)
 def get_cache_len(cache: Tensor):
     return cache.shape[1]
+
+
+@dataclass
+class PagedAttentionParams:
+    headNum: int
+    qkScale: float
+    kvHeadNum: int
+    maskType: int = 0
+
+
+def paged_decode_attentio_atb(
+    query,
+    key_cache,
+    value_cache,
+    block_table,
+    block_size,
+    kv_seq_len,
+    num_q_heads,
+    num_kv_heads,
+    sm_scale,
+    attn_output,
+):
+    _, _, head_dim = query.shape
+    total_block, _, _ = key_cache.shape
+    query_dim, value_dim = query.shape[-1], value_cache.shape[-1]
+    value_cache = F.pad(value_cache, (0, query_dim - value_dim))
+    atb_output = torch.empty_like(query)
+    key_cache = key_cache.view(
+        total_block // block_size, block_size, num_kv_heads, head_dim
+    )
+    value_cache = value_cache.view(
+        total_block // block_size, block_size, num_kv_heads, head_dim
+    )
+    contextLens = kv_seq_len.tolist()
+    params = PagedAttentionParams(
+        headNum=num_q_heads,
+        qkScale=sm_scale if sm_scale else 1.0 / math.sqrt(head_dim),
+        kvHeadNum=num_kv_heads,
+    )
+    atb_op.set_op_name("PagedAttentionOperation")
+    atb_op.set_param(json.dumps(params.__dict__))
+    atb_op.execute_out_with_param(
+        [query, key_cache, value_cache, block_table, kv_seq_len.to(torch.int32)],
+        [atb_output],
+        json.dumps({"contextLen": contextLens}),
+    )
+    torch.cuda.synchronize()  # 不需要同步
+    attn_output[:] = atb_output[..., :value_dim]
+    return attn_output
 
 
 @register_ops(vendor_ops_registry)
@@ -178,38 +370,50 @@ def paged_decode_attention(
         )
     if isinstance(block_table, torch.Tensor) and block_table.dtype != torch.int32:
         block_table = block_table.to(torch.int32)
-
-    bs, _, dim = query.shape
-    query = query.contiguous()
-    query = query.view(bs, 1, num_q_heads * dim)
-    kv_cache_len = key_cache.shape[0]
-    key_cache = key_cache.view(1, kv_cache_len, -1)
-    value_cache = value_cache.view(1, kv_cache_len, -1)
-    scale_value = 1.0 / math.sqrt(dim)
-
-    torch.ops.npu_ext.npu_incre_flash_attention_v4_out(
+    paged_decode_attentio_atb(
         query,
         key_cache,
         value_cache,
-        attn_output.view_as(query),
-        padding_mask=None,
-        atten_mask=None,
-        actual_seq_lengths=kv_seq_len.tolist(),
-        antiquant_scale=None,
-        antiquant_offset=None,
-        block_table=block_table,
-        dequant_scale1=None,
-        quant_scale1=None,
-        dequant_scale2=None,
-        quant_scale2=None,
-        quant_offset2=None,
-        num_heads=num_q_heads,
-        scale_value=scale_value,
-        input_layout="BSH",
-        num_key_value_heads=num_kv_heads,
-        block_size=block_size,
-        inner_precise=1,
+        block_table,
+        block_size,
+        kv_seq_len,
+        num_q_heads,
+        num_kv_heads,
+        softmax_scale,
+        attn_output,
     )
+
+    # bs, _, dim = query.shape
+    # query = query.contiguous()
+    # query = query.view(bs, 1, num_q_heads * dim)
+    # kv_cache_len = key_cache.shape[0]
+    # key_cache = key_cache.view(1, kv_cache_len, -1)
+    # value_cache = value_cache.view(1, kv_cache_len, -1)
+    # scale_value = 1.0 / math.sqrt(dim)
+
+    # torch.ops.npu_ext.npu_incre_flash_attention_v4_out(
+    #     query,
+    #     key_cache,
+    #     value_cache,
+    #     attn_output.view_as(query),
+    #     padding_mask=None,
+    #     atten_mask=None,
+    #     actual_seq_lengths=kv_seq_len.tolist(),
+    #     antiquant_scale=None,
+    #     antiquant_offset=None,
+    #     block_table=block_table,
+    #     dequant_scale1=None,
+    #     quant_scale1=None,
+    #     dequant_scale2=None,
+    #     quant_scale2=None,
+    #     quant_offset2=None,
+    #     num_heads=num_q_heads,
+    #     scale_value=scale_value,
+    #     input_layout="BSH",
+    #     num_key_value_heads=num_kv_heads,
+    #     block_size=block_size,
+    #     inner_precise=1,
+    # )
     return attn_output
 
 
