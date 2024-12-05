@@ -25,7 +25,7 @@ __all__ = [
 class SocVersion:
     Ascend310P: str = "Ascend310P"
     Ascend910B: str = "Ascend910B"
-    device_name = torch_npu.npu.get_device_name(0)[:10]
+    device_name = torch.npu.get_device_name(0)[:10]
 
     @classmethod
     def is_Ascend310P(cls) -> bool:
@@ -117,7 +117,6 @@ def prefill_attention(
             query = query.view(query.shape[0] * query.shape[1], num_q_heads, -1)
             key = key.view(key.shape[0] * key.shape[1], num_kv_heads, -1)
             value = value.view(value.shape[0] * value.shape[1], num_kv_heads, -1)
-        scale_value = softmax_scale if softmax_scale else 1.0 / math.sqrt(query.shape[-1])
         attn_mask_ = None if len(attn_mask) == 0 else attn_mask[0]
         attn_output.view(query.shape)[:] = torch.ops.npu.npu_fusion_attention(
             query,
@@ -137,32 +136,20 @@ def prefill_attention(
             batch = len(seq_qlen_list)
             start = 0
             for i in range(batch):
-                end = start + seq_qlen_list[i]
-                single_seqlen = int(seq_qlen_list[i])
-
-                single_q = query[start:end].view(1, single_seqlen, -1)
-                single_k = key[start:end].reshape(1, single_seqlen, -1)
-                single_v = value[start:end].reshape(1, single_seqlen, -1)
-                single_o = attn_output[start:end].view(1, single_seqlen, -1)
-
+                end = start + q_seq_len[i]
+                single_seq_len = int(q_seq_len[i])
+                single_q = query[start:end].view(single_seq_len, num_q_heads, -1).transpose(0, 1)
+                single_k = key[start:end].view(single_seq_len, num_kv_heads, -1).transpose(0, 1)
+                single_v = value[start:end].view(single_seq_len, num_kv_heads, -1).transpose(0, 1)
+                single_out = attn_output[start:end, :].view(single_seq_len, num_q_heads, -1)
                 start = end
-                actual_seq_lengths = seq_qlen_list[i : i + 1]
-
-                torch.ops.npu_ext.npu_prompt_flash_attention_out(
-                    single_q,
-                    single_k,
-                    single_v,
-                    single_o,
-                    padding_mask=None,
-                    atten_mask=None,
-                    actual_seq_lengths=actual_seq_lengths,
-                    num_heads=num_q_heads,
-                    scale_value=scale_value,
-                    pre_tokens=2147473647,
-                    next_tokens=0,
-                    input_layout="BSH",
-                    num_key_value_heads=num_kv_heads,
-                )
+                mask = torch.zeros(seq_qlen_list[i], seq_qlen_list[i]).fill_(-float('inf')).cuda()
+                mask = torch.triu(mask, diagonal=1)
+                attn_weights = torch.matmul(single_q, single_k.transpose(-2, -1)) / math.sqrt(query.shape[-1])
+                if mask is not None:
+                    attn_weights += mask.unsqueeze(0)
+                attn_probs = torch.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+                single_out[:] = torch.matmul(attn_probs, single_v).transpose(0, 1).contiguous()
         else:
             # For now, the value of attn_mask is None only in vit
             seq_len_list = None if q_seq_len is None else q_seq_len.tolist()
@@ -217,8 +204,11 @@ def fill_kv_cache(
 
     key_cache_reshaped = key_cache.view(block_total, head, dim)
     value_cache_reshaped = value_cache.view(block_total, head, dim)
-    torch.ops.npu.npu_scatter_nd_update_(key_cache_reshaped, kv_indices, key)
-    torch.ops.npu.npu_scatter_nd_update_(value_cache_reshaped, kv_indices, value)
+    # torch.ops.npu.npu_scatter_nd_update_(key_cache_reshaped, kv_indices, key)
+    # torch.ops.npu.npu_scatter_nd_update_(value_cache_reshaped, kv_indices, value)
+    kv_indices = kv_indices.view(-1)
+    key_cache_reshaped[kv_indices] = key
+    value_cache_reshaped[kv_indices] = value
     return key_cache, value_cache
 
 
@@ -364,7 +354,9 @@ def rms_norm(hidden_states: Tensor, weight: Tensor, epsilon: float) -> Tensor:
 
 @register_ops(vendor_ops_registry)
 def silu_and_mul(input_tensor: Tensor, dim: int) -> Tensor:
-    return torch.ops.npu.npu_swiglu(input_tensor, dim)
+    gate_cache, up_cache = input_tensor.chunk(2, dim)
+    return torch.nn.functional.silu(gate_cache, inplace=False) * up_cache
+    # return torch.ops.npu.npu_swiglu(input_tensor, dim)
 
 
 @register_ops(vendor_ops_registry)
