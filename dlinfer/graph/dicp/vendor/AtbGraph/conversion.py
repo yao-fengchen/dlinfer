@@ -145,27 +145,56 @@ class AtenToAtbTransformer(SingleOpTransformer):
         v_scales_zeros,
         quant_bits,
     ):
-        key_cache_shape = key_cache.node.meta["val"].shape
-        key_shape = key.node.meta["val"].shape
+        # key_cache_shape = key_cache.node.meta["val"].shape
+        # key_shape = key.node.meta["val"].shape
+        # key_cache_reshaped = self.get_proxy(
+        #     atb_op.View,
+        #     (
+        #         key_cache,
+        #         (key_cache_shape[0], key_cache_shape[1], key_shape[-2], key_shape[-1]),
+        #     ),
+        # )
+        # value_cache_shape = value_cache.node.meta["val"].shape
+        # value_shape = value.node.meta["val"].shape
+        # value_cache_reshaped = self.get_proxy(
+        #     atb_op.View,
+        #     (
+        #         value_cache,
+        #         (
+        #             value_cache_shape[0],
+        #             value_cache_shape[1],
+        #             value_shape[-2],
+        #             value_shape[-1],
+        #         ),
+        #     ),
+        # )
+        num_blocks, block_size = key_cache.node.meta["val"].shape[:2]
+        seq_lens, num_kv_heads, head_size = key.node.meta["val"].shape
         key_cache_reshaped = self.get_proxy(
-            atb_op.View,
+            atb_op.Transpose,
             (
-                key_cache,
-                (key_cache_shape[0], key_cache_shape[1], key_shape[-2], key_shape[-1]),
+                self.get_proxy(
+                    atb_op.View,
+                    (
+                        key_cache,
+                        (num_blocks, block_size, num_kv_heads * head_size // 16, 16),
+                    ),
+                ),
+                (0, 2, 1, 3),
             ),
         )
-        value_cache_shape = value_cache.node.meta["val"].shape
-        value_shape = value.node.meta["val"].shape
+
         value_cache_reshaped = self.get_proxy(
-            atb_op.View,
+            atb_op.Transpose,
             (
-                value_cache,
-                (
-                    value_cache_shape[0],
-                    value_cache_shape[1],
-                    value_shape[-2],
-                    value_shape[-1],
+                self.get_proxy(
+                    atb_op.View,
+                    (
+                        value_cache,
+                        (num_blocks, block_size, num_kv_heads * head_size // 16, 16),
+                    ),
                 ),
+                (0, 2, 1, 3),
             ),
         )
         out = self.get_proxy(
@@ -200,11 +229,39 @@ class AtenToAtbTransformer(SingleOpTransformer):
         v_shape = list(value_cache.node.meta["val"].shape)
         is_kv_require_reshape = len(k_shape) == 3 or len(v_shape) == 3
         if is_kv_require_reshape:
+            # key_cache = self.get_proxy(
+            #     atb_op.View, (key_cache, (k_shape[0], k_shape[1], kv_head_num, -1))
+            # )
+            # value_cache = self.get_proxy(
+            #     atb_op.View, (value_cache, (v_shape[0], v_shape[1], kv_head_num, -1))
+            # )
+            num_blocks, block_size = key_cache.node.meta["val"].shape[:2]
+            seq_lens, num_kv_heads, head_size = query.node.meta["val"].shape
             key_cache = self.get_proxy(
-                atb_op.View, (key_cache, (k_shape[0], k_shape[1], kv_head_num, -1))
+                atb_op.Transpose,
+                (
+                    self.get_proxy(
+                        atb_op.View,
+                        (
+                            key_cache,
+                            (num_blocks, block_size, num_kv_heads * head_size // 16, 16),
+                        ),
+                    ),
+                    (0, 2, 1, 3),
+                ),
             )
             value_cache = self.get_proxy(
-                atb_op.View, (value_cache, (v_shape[0], v_shape[1], kv_head_num, -1))
+                atb_op.Transpose,
+                (
+                    self.get_proxy(
+                        atb_op.View,
+                        (
+                            value_cache,
+                            (num_blocks, block_size, num_kv_heads * head_size // 16, 16),
+                        ),
+                    ),
+                    (0, 2, 1, 3),
+                ),
             )
         out = self.get_proxy(
             atb_op.PagedAttention,
@@ -442,13 +499,13 @@ class AtenToAtbTransformer(SingleOpTransformer):
             num_kv_heads = k_shape[-2]
             kv_head_size = k_shape[-1]
 
-            query = self.get_proxy(
-                atb_op.View, (query, [-1, num_q_heads * kv_head_size])
-            )
-            key = self.get_proxy(atb_op.View, (key, [-1, num_kv_heads * kv_head_size]))
-            value = self.get_proxy(
-                atb_op.View, (value, [-1, num_kv_heads * kv_head_size])
-            )
+            # query = self.get_proxy(
+            #     atb_op.View, (query, [-1, num_q_heads * kv_head_size])
+            # )
+            # key = self.get_proxy(atb_op.View, (key, [-1, num_kv_heads * kv_head_size]))
+            # value = self.get_proxy(
+            #     atb_op.View, (value, [-1, num_kv_heads * kv_head_size])
+            # )
 
             out = self.get_proxy(
                 atb_op.SelfAttentionPAEncoder,
