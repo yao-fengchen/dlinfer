@@ -25,7 +25,7 @@ __all__ = [
 class SocVersion:
     Ascend310P: str = "Ascend310P"
     Ascend910B: str = "Ascend910B"
-    device_name = torch_npu.npu.get_device_name(0)[:10]
+    device_name = torch.npu.get_device_name(0)[:10]
 
     @classmethod
     def is_Ascend310P(cls) -> bool:
@@ -117,7 +117,6 @@ def prefill_attention(
             query = query.view(query.shape[0] * query.shape[1], num_q_heads, -1)
             key = key.view(key.shape[0] * key.shape[1], num_kv_heads, -1)
             value = value.view(value.shape[0] * value.shape[1], num_kv_heads, -1)
-        scale_value = softmax_scale if softmax_scale else 1.0 / math.sqrt(query.shape[-1])
         attn_mask_ = None if len(attn_mask) == 0 else attn_mask[0]
         attn_output.view(query.shape)[:] = torch.ops.npu.npu_fusion_attention(
             query,
@@ -161,7 +160,7 @@ def prefill_attention(
                     pre_tokens=2147473647,
                     next_tokens=0,
                     input_layout="BSH",
-                    num_key_value_heads=num_kv_heads,
+                    num_key_value_heads=0,
                 )
         else:
             # For now, the value of attn_mask is None only in vit
