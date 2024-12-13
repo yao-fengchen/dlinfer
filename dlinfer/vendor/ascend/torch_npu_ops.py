@@ -406,20 +406,28 @@ def weight_quant_matmul(
 @register_ops(vendor_ops_registry)
 def fused_moe(
     hidden_states: Tensor,
-    top_k: int,
-    topk_ids: Tensor,
-    topk_weights: Tensor,
     gate_up_weights: Tensor,
     down_weights: Tensor,
+    topk_weights: Tensor,
+    topk_ids: Tensor,
+    topk: int,
+    expert_offset: int,
+    num_experts: int,
+    renormalize: bool,
 ) -> Tensor:
     seq_length = hidden_states.size(0)
     moe_output = torch.zeros_like(hidden_states)
+
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    if not topk_weights.is_contiguous():
+        topk_weights = topk_weights.contiguous()
 
     for i in range(seq_length):
         current_hidden_state = hidden_states[i]
 
         # faster than remove the for loop
-        for j in range(top_k):
+        for j in range(topk):
             expert_id = topk_ids[i][j]
             weight = topk_weights[i][j]
 
@@ -427,7 +435,8 @@ def fused_moe(
             up_proj = torch.matmul(up_weight, current_hidden_state)
 
             gate_cache, up_cache = up_proj.chunk(2, -1)
-            gate_cache = torch.nn.functional.silu(gate_cache, inplace=True) * up_cache
+            silu = torch.nn.SiLU(inplace=False)
+            gate_cache = silu(gate_cache) * up_cache
 
             down_weight = down_weights[expert_id]
             down_proj = torch.matmul(down_weight, gate_cache)
