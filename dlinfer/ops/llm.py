@@ -540,7 +540,6 @@ def fused_moe(
     topk_ids: Tensor,
     topk: int,
     expert_offset: int,
-    num_experts: int,
     renormalize: bool,
 ) -> Tensor:
     """
@@ -566,7 +565,6 @@ def fused_moe(
         topk_ids,
         topk,
         expert_offset,
-        num_experts,
         renormalize,
     )
 

@@ -412,7 +412,6 @@ def fused_moe(
     topk_ids: Tensor,
     topk: int,
     expert_offset: int,
-    num_experts: int,
     renormalize: bool,
 ) -> Tensor:
     seq_length = hidden_states.size(0)

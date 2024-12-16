@@ -571,7 +571,6 @@ class AtenToAtbTransformer(SingleOpTransformer):
         topk_ids,
         topk,
         expert_offset,
-        num_experts,
         renormalize,
     ):
         hidden_states_dtype = hidden_states.node.meta["val"].dtype
@@ -589,11 +588,28 @@ class AtenToAtbTransformer(SingleOpTransformer):
         )
 
         topk_weights_dtype = topk_weights.node.meta["val"].dtype
-        if topk_weights_dtype != hidden_states_dtype:
+        topk_weights_shape = topk_weights.node.meta["val"].shape
+        topk_weights_rank = len(topk_weights_shape)
+        if renormalize:
+            topk_weights = self.get_proxy(atb_op.Cast, (topk_weights, torch.float16))
             topk_weights = self.get_proxy(
-                atb_op.Cast, (topk_weights, hidden_states_dtype)
+                atb_op.Div,
+                (
+                    topk_weights,
+                    self.get_proxy(
+                        atb_op.Unsqueeze,
+                        (
+                            self.get_proxy(
+                                atb_op.ReduceSum,
+                                (topk_weights, topk_weights_rank - 1, False),
+                            ),
+                            -1,
+                        ),
+                    ),
+                ),
             )
-
+        # if topk_weights_dtype != hidden_states_dtype:
+        topk_weights = self.get_proxy(atb_op.Cast, (topk_weights, hidden_states_dtype))
         topk_ids_shape = topk_ids.node.meta["val"].shape
         squeeze_shape = [
             -1 if isinstance(x, torch.SymInt) else x for x in topk_ids_shape
