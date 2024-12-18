@@ -570,7 +570,6 @@ class AtenToAtbTransformer(SingleOpTransformer):
         topk_weights,
         topk_ids,
         topk,
-        expert_offset,
         renormalize,
     ):
         hidden_states_dtype = hidden_states.node.meta["val"].dtype
@@ -587,7 +586,7 @@ class AtenToAtbTransformer(SingleOpTransformer):
             atb_op.Muls, (hidden_states, 0, get_ascend_dtype(hidden_states_dtype))
         )
 
-        topk_weights_dtype = topk_weights.node.meta["val"].dtype
+        # topk_weights_dtype = topk_weights.node.meta["val"].dtype
         topk_weights_shape = topk_weights.node.meta["val"].shape
         topk_weights_rank = len(topk_weights_shape)
         if renormalize:
@@ -601,7 +600,7 @@ class AtenToAtbTransformer(SingleOpTransformer):
                         (
                             self.get_proxy(
                                 atb_op.ReduceSum,
-                                (topk_weights, topk_weights_rank - 1, False),
+                                (topk_weights, [topk_weights_rank - 1]),
                             ),
                             -1,
                         ),
