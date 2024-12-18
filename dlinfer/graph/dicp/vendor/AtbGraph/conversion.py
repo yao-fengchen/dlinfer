@@ -137,17 +137,7 @@ class AtenToAtbTransformer(SingleOpTransformer):
         return self.get_proxy(atb_op.InplaceDiv, (x, other))
 
     @register_conversion("torch.ops.dlinfer.fill_kv_cache.default")
-    def fill_kv_cache(
-        self,
-        key,
-        value,
-        key_cache,
-        value_cache,
-        kv_indices,
-        k_scales_zeros,
-        v_scales_zeros,
-        quant_bits,
-    ):
+    def fill_kv_cache(self, key, value, key_cache, value_cache, kv_indices):
         key_cache_shape = key_cache.node.meta["val"].shape
         key_shape = key.node.meta["val"].shape
         key_cache_reshaped = self.get_proxy(
@@ -192,9 +182,6 @@ class AtenToAtbTransformer(SingleOpTransformer):
         softmax_scale,
         alibi_slopes,
         attn_output,
-        kv_scales,
-        kv_zeros,
-        quant_bits,
     ):
         q_head_num = num_q_heads
         kv_head_num = num_kv_heads
@@ -428,9 +415,6 @@ class AtenToAtbTransformer(SingleOpTransformer):
         block_size,
         mask,
         is_unpaged_prefill,
-        kv_scales,
-        kv_zeros,
-        quant_bits,
     ):
         # k_cache = self.get_proxy(atb_op.View, (k_cache, [-1, block_size, num_kv_heads, kv_head_size]))
         # v_cache = self.get_proxy(atb_op.View, (v_cache, [-1, block_size, num_kv_heads, kv_head_size]))
