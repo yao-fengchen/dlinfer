@@ -394,32 +394,65 @@ def fused_moe(
     renormalize: bool,
 ) -> Tensor:
     seq_length = hidden_states.size(0)
-    moe_output = torch.zeros_like(hidden_states)
+    num_experts = gate_up_weights.size(0)
+    topk_ids = topk_ids.to(torch.int32)
 
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
     if not topk_weights.is_contiguous():
         topk_weights = topk_weights.contiguous()
 
-    for i in range(seq_length):
-        current_hidden_state = hidden_states[i]
+    row_idx = (
+        torch.arange(seq_length * topk, dtype=torch.int32, device=hidden_states.device)
+        .view((topk, seq_length))
+        .transpose(0, 1)
+        .contiguous()
+    )
+    active_num = 10240
+    expanded_hidden_states, expanded_row_idx, expanded_expert_idx = (
+        torch.ops.npu.npu_moe_init_routing(hidden_states, row_idx, topk_ids, active_num)
+    )
 
-        # faster than remove the for loop
-        for j in range(topk):
-            expert_id = topk_ids[i][j]
-            weight = topk_weights[i][j]
+    gate_up_weights = gate_up_weights.transpose(1, 2)
+    flattened_ids = topk_ids.flatten()
+    counts = torch.bincount(flattened_ids, minlength=num_experts)
+    cumulative_counts = torch.cumsum(counts, dim=0)
+    group_list = cumulative_counts.tolist()
+    up_proj = torch.ops.npu.npu_grouped_matmul(
+        [expanded_hidden_states],
+        [weight for weight in gate_up_weights],
+        bias=None,
+        group_list=group_list,
+        split_item=0,
+    )
+    up_proj = torch.cat(up_proj)
 
-            up_weight = gate_up_weights[expert_id]
-            up_proj = torch.matmul(up_weight, current_hidden_state)
+    gate_cache = silu_and_mul(up_proj, -1)
 
-            gate_cache, up_cache = up_proj.chunk(2, -1)
-            silu = torch.nn.SiLU(inplace=False)
-            gate_cache = silu(gate_cache) * up_cache
+    down_weights = down_weights.transpose(1, 2)
+    down_proj = torch.ops.npu.npu_grouped_matmul(
+        [gate_cache],
+        [weight for weight in down_weights],
+        bias=None,
+        group_list=group_list,
+        split_item=0,
+    )
+    down_proj = torch.cat(down_proj)
 
-            down_weight = down_weights[expert_id]
-            down_proj = torch.matmul(down_weight, gate_cache)
+    skip = torch.zeros_like(hidden_states)
+    bias = torch.zeros_like(down_proj)
+    moe_output = torch.ops.npu.npu_moe_finalize_routing(
+        down_proj,
+        skip1=skip,
+        skip2=skip,
+        bias=bias,
+        scales=topk_weights.to(hidden_states.dtype),
+        expanded_src_to_dst_row=expanded_row_idx,
+        export_for_source_row=torch.zeros(
+            (seq_length, topk), dtype=torch.int32, device=hidden_states.device
+        ),
+    )
 
-            moe_output[i] += weight * down_proj
     return moe_output
 
 
