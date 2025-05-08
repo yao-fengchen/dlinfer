@@ -37,6 +37,27 @@ class LinearAllReduce(Operator):
         return out
 
 
+class LinearParallel(Operator):
+    def __init__(self):
+        super().__init__("LinearParallel")
+
+    def infer_result(
+        self, x, weight, bias, dp_gather, all_reduce, rank, tp_size, group
+    ):
+        assert (
+            dp_gather or all_reduce
+        ), "only support linear_all_reduce, linear_reduce_scatter, all_gather_linear."
+        rank_size = len(tp_size)
+        if all_reduce:
+            out = torch.matmul(x, weight.t())
+            if tp_size is not None:
+                out = out[: out.shape[0] // rank_size]
+        else:
+            out = torch.matmul(x, weight.t())
+            out = out.new_empty((out.shape[0] * rank_size, *out.shape[1:]))
+        return out
+
+
 class AllReduce(Operator):
     def __init__(self):
         super().__init__("AllReduce")
@@ -402,6 +423,7 @@ class SplitSharing(Operator):
         super().__init__("SplitSharing")
 
     def infer_result(self, x, size, dim):
+        assert x.shape[dim] % len(size) == 0
         return x.split(size, dim=dim)
 
 

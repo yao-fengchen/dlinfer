@@ -22,6 +22,7 @@ __all__ = [
     "weight_quant_matmul",
     "fused_moe",
     "linear",
+    "linear_parallel",
     "dynamic_quant",
     "linear_w8a8",
     "rms_norm_w8a8",
@@ -585,7 +586,10 @@ def linear_impl_abstract_func(
     x: Tensor,
     weight: Tensor,
     bias: Optional[Tensor],
+    dp_gather: Optional[bool],
     all_reduce: Optional[bool],
+    rank: Optional[int],
+    tp_size: Optional[Sequence[int]],
     group: Optional[str],
 ) -> Tensor:
     shape_x = x.shape
@@ -595,19 +599,39 @@ def linear_impl_abstract_func(
     cx = shape_x[-1]
     cy = shape_w[-1]
     assert cx == cy, "The last dimension of x must match the last dimension of weight."
-    return x.new_empty((shape_x[:-1] + shape_w[-2:-1]))
+    if all_reduce:
+        out = x.new_empty((shape_x[:-1] + shape_w[-2:-1]))
+        if tp_size is not None:
+            rank_size = len(tp_size)
+            out = out[: out.shape[0] // rank_size]
+    else:
+        out = x.new_empty((shape_x[:-1] + shape_w[-2:-1]))
+        if dp_gather:
+            rank_size = len(tp_size)
+            out = out.new_empty((out.shape[0] * rank_size, *out.shape[1:]))
+    return out
 
 
 @register_custom_op(
     "dlinfer::linear",
     impl_abstract_func=linear_impl_abstract_func,
-    default_value={"bias": None, "all_reduce": False, "group": ""},
+    default_value={
+        "bias": None,
+        "dp_gather": False,
+        "all_reduce": False,
+        "rank": 0,
+        "tp_size": None,
+        "group": "",
+    },
 )
 def linear(
     x: Tensor,
     weight: Tensor,
     bias: Optional[Tensor],
+    dp_gather: Optional[bool],
     all_reduce: Optional[bool],
+    rank: Optional[int],
+    tp_size: Optional[Sequence[int]],
     group: Optional[str],
 ) -> Tensor:
     """
@@ -629,6 +653,39 @@ def dynamic_quant_impl_abstract_func(
     x: Tensor, quant_dtype: torch.dtype, quant_granularity: str = "PER_TOKEN"
 ):
     return x.to(quant_dtype), x.new_empty(x.shape[:-1], dtype=torch.float)
+
+
+def linear_parallel_impl_abstract_func(
+    x: Tensor,
+    weight: Tensor,
+    bias: Optional[Tensor],
+    parallel_type: Optional[int],
+    group: Optional[str],
+) -> Tensor:
+    shape_x = x.shape
+    shape_w = weight.shape
+    rank_w = len(weight.shape)
+    assert rank_w == 2, "weight in linear must be a 2D tensor"
+    cx = shape_x[-1]
+    cy = shape_w[-1]
+    assert cx == cy, "The last dimension of x must match the last dimension of weight."
+    out = x.new_empty((shape_x[:-1] + shape_w[-2:-1]))
+    return torch.cat([out, out], dim=1)
+
+
+@register_custom_op(
+    "dlinfer::linear_parallel",
+    impl_abstract_func=linear_parallel_impl_abstract_func,
+    default_value={"bias": None, "parallel_type": 0, "group": ""},
+)
+def linear_parallel(
+    x: Tensor,
+    weight: Tensor,
+    bias: Optional[Tensor],
+    parallel_type: Optional[int],
+    group: Optional[str],
+) -> Tensor:
+    return vendor_ops_registry["linear_parallel"](x, weight, bias, parallel_type, group)
 
 
 @register_custom_op(

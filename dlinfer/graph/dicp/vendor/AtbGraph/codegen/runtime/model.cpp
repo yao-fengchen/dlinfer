@@ -3,6 +3,7 @@
 #include <atb/utils.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <fstream>
 
 #include "ops/operation_creator.h"
@@ -279,6 +280,18 @@ atb::Status Model::Execute(atb::Context* context, std::vector<atb::Tensor>& inTe
 
 atb::Status Model::ExecuteNode(int nodeId) {
     auto& node = graph_.nodes.at(nodeId);
+    auto opname = node.operation->GetName();
+    DICP_LOG(INFO) << "opname: " << opname;
+    if (opname == "LinearParallelOperation") {
+        DICP_LOG(INFO) << "intensor 0 shape:";
+        for (size_t i = 0; i < node.variantPack.inTensors.at(0).desc.shape.dimNum; ++i) {
+            DICP_LOG(INFO) << node.variantPack.inTensors.at(0).desc.shape.dims[i];
+        }
+        DICP_LOG(INFO) << "outtensor 0 shape:";
+        for (size_t i = 0; i < node.variantPack.outTensors.at(0).desc.shape.dimNum; ++i) {
+            DICP_LOG(INFO) << node.variantPack.outTensors.at(0).desc.shape.dims[i];
+        }
+    }
     atb::Status st = node.operation->Setup(node.variantPack, node.workspaceSize, context_);
     if (st != 0) {
         DICP_LOG(ERROR) << modelId_ << " setup node[" << nodeId << "] fail, not call execute";
