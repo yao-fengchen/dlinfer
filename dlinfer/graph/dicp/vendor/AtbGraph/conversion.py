@@ -353,7 +353,7 @@ class AtenToAtbTransformer(SingleOpTransformer):
         return self.get_proxy(atb_op.View, (x, size))
 
     @register_conversion(torch.ops.aten.split_with_sizes.default)
-    def split_with_sizes(self, x, size, dim):
+    def split_with_sizes(self, x, size, dim=0):
         if len(set(size)) == 1 and (len(size) == 2 or len(size) == 3):
             return self.get_proxy(atb_op.SplitSharing, (x, size, dim))
         return self.get_proxy(atb_op.SplitWithSize, (x, size, dim))
@@ -433,7 +433,7 @@ class AtenToAtbTransformer(SingleOpTransformer):
         return self.get_proxy(atb_op.Cos, (x,))
 
     @register_conversion(torch.ops.aten.cat.default)
-    def cat(self, x, dim):
+    def cat(self, x, dim=0):
         return self.get_proxy(atb_op.Concat, (x, dim))
 
     @register_conversion(torch.ops.aten.bmm.default)
@@ -610,6 +610,10 @@ class AtenToAtbTransformer(SingleOpTransformer):
         offsets = [0] * len(x_shape)
         size = [-1] * len(x_shape)
 
+        if not isinstance(start, int):
+            # print(f"start info: {start.node.meta}", flush=True)
+            start = 0
+            end = 119
         offsets[dim] = start
         if end >= 9223372036854775807:
             size[dim] = -1
@@ -637,10 +641,35 @@ class AtenToAtbTransformer(SingleOpTransformer):
         return self.get_proxy(atb_op.View, (x, shape))
 
     @register_conversion("torch.ops.dlinfer.linear.default")
-    def dlinfer_linear(self, x, weight, bias, all_reduce, group):
-        if all_reduce == False:
-            return self.get_proxy(atb_op.Linear, (x, weight, bias, False, True))
-        return self.get_proxy(atb_op.LinearAllReduce, (x, weight, bias, group))
+    def dlinfer_linear(
+        self, x, weight, bias, dp_gather, all_reduce, rank, tp_size, group
+    ):
+        if not (dp_gather or all_reduce):
+            out= self.get_proxy(atb_op.Linear, (x, weight, bias, False, True))
+        elif all_reduce:
+            if tp_size is None:
+                out = self.get_proxy(atb_op.LinearAllReduce, (x, weight, bias, group))
+            else:
+                out = self.get_proxy(
+                atb_op.LinearParallel,
+                (x, weight, bias, dp_gather, all_reduce, rank, tp_size, group))
+                # x_shape = list(x.node.meta["val"].shape)
+                # offsets = [0] * len(x_shape)
+                # size = [-1] * len(x_shape)
+                # offsets[0] = 0
+                # size[0] = tp_size[rank]
+                # out = self.get_proxy(atb_op.Slice, (linear_parallel, 0, offsets, size))
+        else:
+            # x_shape = list(x.node.meta["val"].shape)
+            # target_dim = 0
+            # x_shape.pop(target_dim)
+            # x_shape = [str(x) for x in x_shape]
+            # squeeze = self.get_proxy(atb_op.Squeeze, (x, target_dim, x_shape))
+            out = self.get_proxy(
+                atb_op.LinearParallel,
+                (x, weight, bias, dp_gather, all_reduce, rank, tp_size, group),
+            )
+        return out
 
     @register_conversion(torch.ops.aten.index.Tensor)
     def index_tensor(self, x, indices):
@@ -740,7 +769,7 @@ class AtenToAtbTransformer(SingleOpTransformer):
         return self.get_proxy(atb_op.InplaceScatter, (x, dim, index, src))
 
     @register_conversion(torch.ops.aten.scalar_tensor.default)
-    def aten_scalar_tensor(self, x, dtype, layout, device):
+    def aten_scalar_tensor(self, x, dtype, layout, device, pin_memory=False):
         return self.get_proxy(atb_op.ScalarTensor, (float(x), dtype))
 
     @register_conversion(torch.ops.aten.sum.dim_IntList)

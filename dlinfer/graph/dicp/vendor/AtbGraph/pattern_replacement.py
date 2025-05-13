@@ -5,6 +5,7 @@ from dlinfer.graph.dicp.dynamo_bridge.op_transformer import (
     PatternMatcherPass,
     register_backend_patterns,
 )
+from dlinfer.graph.dicp.vendor.AtbGraph.codegen import atb_infer_param as infer_param
 
 atb_pattern_matcher = PatternMatcherPass()
 
@@ -76,6 +77,81 @@ class TorchLInearAllreduce(BackendPatternBase):
     @staticmethod
     def replacement(x, weight, bias, allreduce, lmdeploy_group_type, group):
         return torch.ops.dlinfer.linear.default(x, weight, bias, True, group)
+
+
+@register_torch_pattern_1
+class TorchAllGatherLinear(BackendPatternBase):
+    @staticmethod
+    def pattern(
+        x,
+        weight,
+        bias,
+        dp_gather,
+        all_reduce,
+        lmdeploy_group_type,
+        size,
+        group_size,
+        group_name,
+        slice_dim,
+        slice1,
+        slice2,
+        rank,
+        tp_size,
+    ):
+        new_empty = torch.ops.aten.new_empty.default(x, size, pin_memory=False)
+        all_gather_into_tensor = (
+            torch.ops._c10d_functional.all_gather_into_tensor.default(
+                x, group_size, group_name
+            )
+        )
+        wait_tensor = torch.ops._c10d_functional.wait_tensor.default(
+            all_gather_into_tensor
+        )
+        slice_tensor_1 = torch.ops.aten.slice.Tensor(wait_tensor, slice_dim, 0, slice1)
+        slice_tensor_2 = torch.ops.aten.slice.Tensor(
+            wait_tensor, slice_dim, slice1, slice2
+        )
+        copy_1 = torch.ops.aten.copy.default(new_empty, slice_tensor_1)
+        copy_2 = torch.ops.aten.copy.default(new_empty, slice_tensor_2)
+        cat = torch.ops.aten.cat.default([copy_1, copy_2])
+        linear = torch.ops.dlinfer.linear.default(
+            cat, weight, bias, dp_gather, all_reduce, rank, tp_size, lmdeploy_group_type
+        )
+        return linear
+
+    @staticmethod
+    def replacement(
+        x,
+        weight,
+        bias,
+        dp_gather,
+        all_reduce,
+        lmdeploy_group_type,
+        size,
+        group_size,
+        group_name,
+        slice_dim,
+        slice1,
+        slice2,
+        rank,
+        tp_size,
+    ):
+        return torch.ops.dlinfer.linear.default(
+            x, weight, bias, dp_gather, all_reduce, rank, tp_size, group_name
+        )
+
+
+@register_torch_pattern_1
+class RemoveDoubleTranspose(BackendPatternBase):
+    @staticmethod
+    def pattern(x, dim1, dim2):
+        transpose_1 = torch.ops.aten.transpose.int(x, dim1, dim2)
+        transpose_2 = torch.ops.aten.transpose.int(transpose_1, dim1, dim2)
+        return transpose_2
+
+    @staticmethod
+    def replacement(x, dim1, dim2):
+        return x
 
 
 @register_torch_pattern_1

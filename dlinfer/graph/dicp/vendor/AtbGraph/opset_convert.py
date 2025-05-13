@@ -69,6 +69,8 @@ def atbgraph_opset_convert(
         cse_pass_result = cse_pass(gm)
         gm = cse_pass_result.graph_module
 
+    print("*** aten ir ***", flush=True)
+    gm.print_readable()
     gm = BackendPatternMatcherTransformer(
         atb_pattern_matcher, torch_patterns_cls_list_1
     ).transform(gm)
@@ -78,4 +80,6 @@ def atbgraph_opset_convert(
     # For bug in pytorch
     # Avoid for dynamic shape
     GraphTransformer.infer_shape_dtype(gm)
+    print("*** dlinfer ir ***", flush=True)
+    gm.print_readable()
     return gm

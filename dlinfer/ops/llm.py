@@ -585,7 +585,10 @@ def linear_impl_abstract_func(
     x: Tensor,
     weight: Tensor,
     bias: Optional[Tensor],
+    dp_gather: Optional[bool],
     all_reduce: Optional[bool],
+    rank: Optional[int],
+    tp_size: Optional[Sequence[int]],
     group: Optional[str],
 ) -> Tensor:
     shape_x = x.shape
@@ -595,19 +598,39 @@ def linear_impl_abstract_func(
     cx = shape_x[-1]
     cy = shape_w[-1]
     assert cx == cy, "The last dimension of x must match the last dimension of weight."
-    return x.new_empty((shape_x[:-1] + shape_w[-2:-1]))
-
+    # return x.new_empty((shape_x[:-1] + shape_w[-2:-1]))
+    if all_reduce:
+        out = x.new_empty((shape_x[:-1] + shape_w[-2:-1]))
+        if tp_size is not None:
+            rank_size = len(tp_size)
+            out = out[: out.shape[0] // rank_size]
+    else:
+        out = x.new_empty((shape_x[:-1] + shape_w[-2:-1]))
+        # if dp_gather:
+        #     rank_size = len(tp_size)
+        #     out = out.new_empty((out.shape[0] * rank_size, *out.shape[1:]))
+    return out
 
 @register_custom_op(
     "dlinfer::linear",
     impl_abstract_func=linear_impl_abstract_func,
-    default_value={"bias": None, "all_reduce": False, "group": ""},
+    default_value={
+        "bias": None,
+        "dp_gather": False,
+        "all_reduce": False,
+        "rank": 0,
+        "tp_size": None,
+        "group": "",
+    },
 )
 def linear(
     x: Tensor,
     weight: Tensor,
     bias: Optional[Tensor],
+    dp_gather: Optional[bool],
     all_reduce: Optional[bool],
+    rank: Optional[int],
+    tp_size: Optional[Sequence[int]],
     group: Optional[str],
 ) -> Tensor:
     """

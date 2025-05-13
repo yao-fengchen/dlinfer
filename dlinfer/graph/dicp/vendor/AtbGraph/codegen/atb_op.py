@@ -86,6 +86,53 @@ class AtbOverrides:
         op.set_output([name])
         return op
 
+    def LinearParallel(
+        name, x, weight, bias, dp_gather, all_reduce, rank, tp_size, group
+    ):
+        op = Operation(name, "LinearParallelOperation")
+        param = infer_param.LinearParallelParam()
+
+        param.transWeight = True
+        param.rank = dist.get_rank()
+        param.rankSize = dist.get_world_size()
+        param.rankRoot = 0
+        param.hasResidual = False
+        param.commMode = infer_param.CommMode.COMM_MULTI_PROCESS
+
+        # LCCL has issues with multiple communication domains. By default,
+        # in single-machine multi-card scenarios, LCCL is enabled.
+        # If precision issues occur or multiple communication domains are required,
+        # HCCL should be used.
+        use_lccl = os.environ.get("DLINFER_ASCEND_USE_LCCL", "1")
+        rank_table_file = os.environ.get("ASCEND_RANK_TABLE_FILE_PATH", None)
+        if (
+            use_lccl == "1"
+            and rank_table_file is None
+            and not SocVersion.is_Ascend310P()
+        ):
+            param.backend = "lccl"
+        else:
+            param.backend = "hccl"
+            param.commDomain = group if group is not None else ""
+            if rank_table_file is not None:
+                param.rankTableFile = rank_table_file
+        if all_reduce:
+            if tp_size is None:
+                param.parallelType = infer_param.ParallelType.LINEAR_ALL_REDUCE
+            else:
+                param.parallelType = infer_param.ParallelType.LINEAR_REDUCE_SCATTER
+                param.backend = "lcoc"
+        elif dp_gather:
+            param.parallelType = infer_param.ParallelType.ALL_GATHER_LINEAR
+            param.backend = "lcoc"
+        if bias:
+            op.set_input([x, weight, bias])
+        else:
+            op.set_input([x, weight])
+        op.set_param(param)
+        op.set_output([name])
+        return op
+
     def AllReduce(name, x, reduce_type, group):
         op = Operation(name, "AllReduceOperation")
         param = infer_param.AllReduceParam()

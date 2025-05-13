@@ -70,6 +70,7 @@ class GraphTransformer:
             fake_value = None
             if n.op == "call_function":
                 try:
+                    print(f"n.target: {n.target}", flush=True)
                     fake_value = n.target(*n.args, **n.kwargs)
                 except Exception as e:
                     raise RuntimeError(f"call function: {n.target} failed!")
