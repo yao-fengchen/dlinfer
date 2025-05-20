@@ -2,7 +2,7 @@ import torch
 from typing import List, Callable, Tuple, Optional, Any
 from lmdeploy.pytorch.models import qwen2_vl
 from lmdeploy.pytorch.models import deepseek_v2
-from lmdeploy.pytorch.distributed import get_world_rank
+from lmdeploy.pytorch.distributed import get_world_rank, get_dist_manager
 
 
 # patch slice_scatter
@@ -61,8 +61,12 @@ def DeepseekV2Attention_forward(
     attn_metadata: Any = None,
 ):
     """Rewrite of LlamaAttention.forward."""
-    world_size, _ = get_world_rank()
-    num_heads = self.num_heads // world_size
+    dist_ctx = get_dist_manager().current_context()
+    if dist_ctx.dp > 1:
+        num_heads = self.num_heads
+    else:
+        world_size = dist_ctx.world_size
+        num_heads = self.num_heads // world_size
     nope_size = self.kv_lora_rank
     q_len = hidden_states.size(1)
 
