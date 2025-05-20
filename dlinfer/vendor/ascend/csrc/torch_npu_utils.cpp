@@ -156,14 +156,14 @@ aclError AclrtCtxSetSysParamOpt(aclSysParamOpt opt, int64_t value) {
     } while (0)
 
 void SetDeterministic() {
-    auto deterministicAlgorithmsStatus = at::globalContext().deterministicAlgorithms();
-    if (at_npu::native::deterministicaclnn_oldstatus != deterministicAlgorithmsStatus) {
-        NPU_CHECK_ERROR(AclSetCompileopt(aclCompileOpt::ACL_OP_DETERMINISTIC, deterministicAlgorithmsStatus ? "1" : "0"));
-        NPU_CHECK_ERROR(AclrtCtxSetSysParamOpt(aclSysParamOpt::ACL_OPT_DETERMINISTIC, deterministicAlgorithmsStatus ? 1 : 0));
-        HcclConfigValue configValue = {deterministicAlgorithmsStatus ? 1 : 0};
-        HCCL_CHECK_ERROR(HcclSetConfig(HcclConfig::HCCL_DETERMINISTIC, configValue));
-        at_npu::native::deterministicaclnn_oldstatus = deterministicAlgorithmsStatus;
-    }
+    // auto deterministicAlgorithmsStatus = at::globalContext().deterministicAlgorithms();
+    // if (at_npu::native::deterministicaclnn_oldstatus != deterministicAlgorithmsStatus) {
+    //     NPU_CHECK_ERROR(AclSetCompileopt(aclCompileOpt::ACL_OP_DETERMINISTIC, deterministicAlgorithmsStatus ? "1" : "0"));
+    //     NPU_CHECK_ERROR(AclrtCtxSetSysParamOpt(aclSysParamOpt::ACL_OPT_DETERMINISTIC, deterministicAlgorithmsStatus ? 1 : 0));
+    //     HcclConfigValue configValue = {deterministicAlgorithmsStatus ? 1 : 0};
+    //     HCCL_CHECK_ERROR(HcclSetConfig(HcclConfig::HCCL_DETERMINISTIC, configValue));
+    //     at_npu::native::deterministicaclnn_oldstatus = deterministicAlgorithmsStatus;
+    // }
 }
 
 }  // namespace ascend

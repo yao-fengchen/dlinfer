@@ -28,4 +28,18 @@ bool checkUceErrAndRepair() {
     return false;
 }
 
+bool checkUceErrAndRepair(bool, std::basic_string<char, std::char_traits<char>, std::allocator<char>>&) {
+    throw std::runtime_error(
+        "Dlinfer checkUceErrAndRepair should not be called. "
+        "Please check your environment setup.");
+    return false;
+}
+
+void record_mem_hbm_ecc_error() {
+    throw std::runtime_error(
+        "Dlinfer record_mem_hbm_ecc_error should not be called. "
+        "Please check your environment setup.");
+    return;
+}
+
 }  // namespace c10_npu
