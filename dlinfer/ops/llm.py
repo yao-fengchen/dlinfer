@@ -21,6 +21,7 @@ __all__ = [
     "get_cache_len",
     "weight_quant_matmul",
     "fused_moe",
+    "fused_moe_with_ep",
     "linear",
     "dynamic_quant",
     "linear_w8a8",
@@ -542,6 +543,31 @@ def weight_quant_matmul(
     """
     return vendor_ops_registry["weight_quant_matmul"](
         x1, x2, scale, offset, bias, all_reduce, group_size
+    )
+
+
+@register_custom_op("dlinfer::fused_moe_with_ep", ["hidden_states"])
+def fused_moe_with_ep(
+    hidden_states: Tensor,
+    gate_up_weights: Tensor,
+    down_weights: Tensor,
+    topk_weights: Tensor,
+    topk_ids: Tensor,
+    topk: int,
+    renormalize: bool,
+    ep_size: int,
+    rank: int,
+) -> Tensor:
+    return vendor_ops_registry["fused_moe_with_ep"](
+        hidden_states,
+        gate_up_weights,
+        down_weights,
+        topk_weights,
+        topk_ids,
+        topk,
+        renormalize,
+        ep_size,
+        rank,
     )
 
 

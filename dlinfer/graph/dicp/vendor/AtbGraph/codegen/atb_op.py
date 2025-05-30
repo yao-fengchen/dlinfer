@@ -963,7 +963,11 @@ class AtbOverrides:
         param.name = name
         param.minlength = minlength
 
-        op.set_input([x, weights])
+        if weights is None:
+            op.set_input([x])
+        else:
+            param.hasWights = True
+            op.set_input([x, weights])
         op.set_param(param)
         op.set_output([name])
         return op
@@ -1242,6 +1246,37 @@ class AtbOverrides:
         param.dims = dim if isinstance(dim, list) else [dim]
         param.keepDim = keep_dim
         param.dtype = ascend_dtype
+        op.set_input([x])
+        op.set_param(param)
+        op.set_output([name])
+        return op
+
+    def AllToAllOperation(name, x, rank, rank_size):
+        op = Operation(name, "AllToAllOperation")
+        param = infer_param.AllToAllOperationParam()
+        param.name = name
+        param.rank = rank
+        param.rankSize = rank_size
+        op.set_input([x])
+        op.set_param(param)
+        op.set_output([name])
+        return op
+
+    def AllToAllVOperation(name, x, scatter_sizes, gather_sizes, rank, rank_size):
+        op = Operation(name, "AllToAllVOperation")
+        param = infer_param.AllToAllVOperationParam()
+        param.name = name
+        param.rank = rank
+        param.rankSize = rank_size
+        op.set_input([x, scatter_sizes, gather_sizes])
+        op.set_param(param)
+        op.set_output([name])
+        return op
+
+    def AclNnInplaceModOperation(name, x, other):
+        op = Operation(name, "AclNnInplaceModOperation")
+        param = infer_param.AclNnInplaceModOperationParam()
+        param.other = other
         op.set_input([x])
         op.set_param(param)
         op.set_output([name])

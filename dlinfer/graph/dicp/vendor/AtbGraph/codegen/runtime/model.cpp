@@ -3,6 +3,8 @@
 #include <atb/utils.h>
 
 #include <algorithm>
+#include <bits/stdint-intn.h>
+#include <cstddef>
 #include <fstream>
 
 #include "ops/operation_creator.h"
@@ -380,9 +382,8 @@ void Model::CreateSingleOperation(const nlohmann::json& paramJson, Node& node) {
     auto opName = getValue<std::string>(paramJson, "name");
     auto opInputNames = getValue<std::vector<std::string>>(paramJson, "inputNames");
     auto opOutputNames = getValue<std::vector<std::string>>(paramJson, "outputNames");
-    atb::Operation* op = CreateOperation(opType, paramJson["param"]);
+    auto param = getValue<nlohmann::json>(paramJson, "param");
 
-    node.operation.reset(op);
     for (const auto& t : opInputNames) {
         if (inputTensorsMap_.count(t) > 0) {
             node.inTensors.push_back(&graph_.inTensors[inputTensorsMap_[t]]);
@@ -395,6 +396,22 @@ void Model::CreateSingleOperation(const nlohmann::json& paramJson, Node& node) {
             throw std::runtime_error("cannot find name in input/internal!");
         }
     }
+    if (opType == "AllToAllOperation") {
+        atb::Tensor* gather = node.inTensors.back();
+        node.inTensors.pop_back();
+        atb::Tensor* scatter = node.inTensors.back();
+        node.inTensors.pop_back();
+        atb::Tensor* x = node.inTensors.back();
+
+        int rank = getValue<int>(paramJson["param"], "rank");
+        int rankSize = getValue<int>(paramJson["param"], "rankSize");
+        UpdateAllToAllVParam(param, *x, *scatter, *gather, rank, rankSize);
+    }
+
+    atb::Operation* op = CreateOperation(opType, param);
+    node.operation.reset(op);
+    node.opType = opType;
+
     for (const auto& t : opOutputNames) {
         if (outputTensorsMap_.count(t) > 0) {
             node.outTensors.push_back(&graph_.outTensors[outputTensorsMap_[t]]);
@@ -618,6 +635,28 @@ void Model::SetupSqueezeReshape(const nlohmann::json& reshapeInput, atb::Reshape
         newShape.dimNum = dimValues.size();
         std::copy(dimValues.begin(), dimValues.end(), newShape.dims);
     };
+}
+
+void Model::UpdateAllToAllVParam(nlohmann::json& param, atb::Tensor& x, atb::Tensor& scatter, atb::Tensor& gather, int64_t rank, int64_t rankSize) {
+    std::vector<int64_t> sendCounts(rankSize), sdispls(rankSize), recvCounts(rankSize), rdispls(rankSize);
+    int64_t unit = 1;
+    for (size_t i = 1; i < x.desc.shape.dimNum; ++i) {
+        unit *= x.desc.shape.dims[i];
+    }
+    auto retSend = aclrtMemcpy(sendCounts.data(), sendCounts.size() * sizeof(int64_t), scatter.deviceData, rankSize, ACL_MEMCPY_DEVICE_TO_HOST);
+    for (size_t i = 0; i < sendCounts.size(); ++i) {
+        sendCounts[i] *= unit;
+        sdispls[i] = i == 0 ? 0 : sendCounts[i] - sendCounts[0];
+    }
+    auto retRecv = aclrtMemcpy(recvCounts.data(), recvCounts.size() * sizeof(int64_t), gather.deviceData, rankSize, ACL_MEMCPY_DEVICE_TO_HOST);
+    for (size_t i = 0; i < recvCounts.size(); ++i) {
+        recvCounts[i] *= unit;
+        rdispls[i] = i == 0 ? 0 : recvCounts[i] - recvCounts[0];
+    }
+    param["sendCounts"] = sendCounts;
+    param["sdispls"] = sdispls;
+    param["recvCounts"] = recvCounts;
+    param["rdispls"] = rdispls;
 }
 
 void Model::ClearInternalTensors() {

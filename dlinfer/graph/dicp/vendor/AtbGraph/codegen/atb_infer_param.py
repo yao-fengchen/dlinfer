@@ -616,6 +616,7 @@ class ReduceParam:
 @dataclass
 class AclNnBincountParam:
     name: str = ""
+    hasWights: bool = False
     minlength: int = 0
 
 
@@ -727,6 +728,44 @@ class AclNnReduceSumParam:
     dims: list[int] = field(default_factory=list)
     keepDim: bool = False
     dtype: str = "FLOAT"
+
+
+@dataclass
+class AllToAllOperationParam:
+    name: str = ""
+    rank: int = 0
+    rankSize: int = 0
+    rankRoot: int = 0
+    backend: str = "hccl"
+    hcclComm: Any = None
+    commMode: CommMode = CommMode.COMM_MULTI_PROCESS
+    rankTableFile: str = ""
+    commDomain: str = ""
+    transpose: bool = False
+
+
+@dataclass
+class AllToAllVOperationParam:
+    name: str = ""
+    rank: int = 0
+    rankSize: int = 0
+    rankRoot: int = 0
+    sendCounts: list = []
+    sdispls: list = []
+    recvCounts: list = []
+    rdispls: list = []
+    backend: str = "hccl"
+    hcclComm: Any = None
+    commMode: CommMode = CommMode.COMM_MULTI_PROCESS
+    rankTableFile: str = ""
+    commDomain: str = ""
+    transpose: bool = False
+
+
+@dataclass
+class AclNnInplaceModOperationParam:
+    name: str = ""
+    other: int = 1
 
 
 def custom_asdict_factory(data):

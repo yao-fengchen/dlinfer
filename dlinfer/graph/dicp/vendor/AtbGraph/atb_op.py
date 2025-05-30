@@ -825,3 +825,27 @@ class AclNnReduceSum(Operator):
 
     def infer_result(self, x, dim, keep_dim, dtype, ascend_dtype):
         return x.sum(dim, keep_dim=keep_dim, dtype=dtype)
+
+
+class AllToAll(Operator):
+    def __init__(self):
+        super().__init__("AllToAllOperation")
+
+    def infer_result(self, x, rank, rank_size):
+        return x
+
+
+class AllToAllV(Operator):
+    def __init__(self):
+        super().__init__("AllToAllVOperation")
+    
+    def infer_result(self, x, scatter_sizes, gather_sizes, rank, rank_size):
+        return x.new_empty([gather_sizes.sum().item()] + x.shape[1:])
+
+
+class AclNnMod(Operator):
+    def __init__(self):
+        super().__init__("AclNnInplaceModOperation")
+    
+    def infer_result(self, x, other):
+        return x % other

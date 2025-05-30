@@ -722,6 +722,99 @@ class AtenToAtbTransformer(SingleOpTransformer):
         )
         return moe_out
 
+    @register_conversion("torch.ops.dlinfer.fused_moe_with_ep.default")
+    def dlinfer_fused_moe(
+        self,
+        hidden_states,
+        gate_up_weights,
+        down_weights,
+        topk_weights,
+        topk_ids,
+        topk,
+        expert_offset,
+        num_experts,
+        renormalize,
+        ep_size,
+        rank,
+    ):
+        local_num_experts = gate_up_weights.node.meta["val"].shape[0]
+        if renormalize:
+            reduce_dim = get_reduce_dim(topk_weights, -1)[0]
+            topk_weights = self.get_proxy(
+                atb_op.Renormalize, (topk_weights, reduce_dim)
+            )
+            topk_weights = self.get_proxy(atb_op.GetItem, (topk_weights, 1))
+
+        # moe init routing
+        moe_init = self.get_proxy(
+            atb_op.AclNnMoeInitRouting,
+            (hidden_states, topk_ids, num_experts),
+        )
+        expanded_hidden_states = self.get_proxy(atb_op.GetItem, (moe_init, 0))
+        expanded_row_idx = self.get_proxy(atb_op.GetItem, (moe_init, 1))
+        group = self.get_proxy(atb_op.GetItem, (moe_init, 2))
+        group = self.get_proxy(atb_op.Cast, (group, torch.int64))
+
+        # allgatherV
+        global_expert_tokens = self.get_proxy(
+            atb_op.View,
+            (
+                self.get_proxy(
+                    atb_op.AclNnBincount, (expanded_row_idx, None, num_experts)
+                ),
+                (ep_size, -1),
+            ),
+        )
+        scatter_sizes = self.get_proxy(
+            atb_op.AclNnReduceSum,
+            (
+                global_expert_tokens,
+                [1],
+                True,
+                torch.int64,
+                get_ascend_dtype(torch.int64),
+            ),
+        )
+        scatter_sizes = self.get_proxy(atb_op.View, (scatter_sizes, (ep_size,)))
+        gather_sizes = self.get_proxy(atb_op.AllToAll, (scatter_sizes, rank, ep_size))
+        # TODO compute new expanded_expert_idx
+        # expanded_expert_idx = expanded_expert_idx % local_num_experts
+        expanded_row_idx = self.get_proxy(atb_op.AclNnMod, (expanded_row_idx, local_num_experts))
+        local_hidden_states = self.get_proxy(atb_op.AllToAllV, (expanded_hidden_states, scatter_sizes, gather_sizes, rank, ep_size))
+        local_row_idx = self.get_proxy(atb_op.AllToAllV, (expanded_row_idx, scatter_sizes, gather_sizes, rank, ep_size))
+        # TODO moe_compute_expert_tokens and hidden_states
+        # sorted_local_expert_idx, sorted_idx = torch.sort(local_expert_idx)
+        sort = self.get_proxy(atb_op.Sort, ())
+
+        # expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
+        #     sorted_local_expert_idx, local_num_experts).to(torch.int64)
+
+        # hidden_states = hidden_states[sorted_idx]
+
+
+
+        # up sample
+        up_sample = self.get_proxy(
+            atb_op.AclNnGroupedMatmul,
+            (local_hidden_states, gate_up_weights, group, 2),
+        )
+        up_proj = self.get_proxy(atb_op.GetItem, (up_sample, 0))
+
+        # activation
+        gate_cache = self.silu_and_mul(up_proj, -1)
+
+        # down sample
+        down_sample = self.get_proxy(
+            atb_op.AclNnGroupedMatmul,
+            (gate_cache, down_weights, group, 2),
+        )
+        down_proj = self.get_proxy(atb_op.GetItem, (down_sample, 0))
+
+
+
+
+
+
     @register_conversion("torch.ops.dlinfer.moe_gating_topk_softmax.default")
     def dlinfer_moe_gating_topk_softmax(self, router_logits, top_k):
         return self.get_proxy(atb_op.AclNnMoeGatingTopkSoftmax, (router_logits, top_k))

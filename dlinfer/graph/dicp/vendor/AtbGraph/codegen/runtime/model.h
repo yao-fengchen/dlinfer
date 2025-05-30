@@ -43,6 +43,7 @@ struct Node {
     atb::SVector<TensorType> inTensorTypes;
     atb::SVector<TensorType> outTensorTypes;
     std::unordered_map<int, int> inplaceIndices;
+    std::string opType;
     uint64_t workspaceSize = 0;
     void* workspace = nullptr;
 };
@@ -92,6 +93,7 @@ private:
     void SetupUnsqueezeReshape(const nlohmann::json& reshapeInput, atb::ReshapeFunc& func);
     void SetupSqueezeReshape(const nlohmann::json& reshapeInput, atb::ReshapeFunc& func);
     void SetupInferShape(const nlohmann::json& inferShape, atb::InferShapeFunc& inferShapeFunc);
+    void UpdateAllToAllVParam(nlohmann::json& param, atb::Tensor& x, atb::Tensor& scatter, atb::Tensor& gather, int64_t rank, int64_t rankSize);
 
 private:
     bool UseTorchNpuLauncher_;
