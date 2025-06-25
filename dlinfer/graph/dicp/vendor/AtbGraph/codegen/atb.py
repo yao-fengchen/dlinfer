@@ -82,6 +82,7 @@ class AtbCodegen(torch.fx.Interpreter):
         pass
 
     def output(self, name, target, args, kwargs):
+        print(f"atbcodegen: {args}", flush=True)
         for arg in args:
             self.output_args.extend(arg)
 
@@ -110,6 +111,7 @@ class AtbCodegen(torch.fx.Interpreter):
                 name = self.args_dict[node.name]
                 self.py_output_names.append(name)
                 if name in self.graph_output_names or name in self.graph_input_names:
+                # if name in self.graph_output_names:
                     continue
                 else:
                     real_output_args.append(node)
@@ -130,7 +132,7 @@ class AtbCodegen(torch.fx.Interpreter):
                 from dlinfer.graph.dicp.dynamo_bridge.compile import AsyncCompileKernel
                 from dlinfer.graph.dicp.vendor.AtbGraph.compile_job import AtbCompileJob
                 
-                # print('### codegen python file path: ', os.path.abspath(__file__))
+                print('### codegen python file path: ', os.path.abspath(__file__))
 
                 aten = torch.ops.aten
                 assert_size_stride = torch._C._dynamo.guards.assert_size_stride

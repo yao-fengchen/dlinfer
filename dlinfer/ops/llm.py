@@ -21,6 +21,10 @@ __all__ = [
     "get_cache_len",
     "weight_quant_matmul",
     "fused_moe",
+    # "renormalize",
+    # "moe_init_routing",
+    # "grouped_matmul",
+    # "moe_token_unpermute",
     "linear",
     "dynamic_quant",
     "linear_w8a8",
@@ -543,6 +547,36 @@ def weight_quant_matmul(
     return vendor_ops_registry["weight_quant_matmul"](
         x1, x2, scale, offset, bias, all_reduce, group_size
     )
+
+
+# @register_custom_op("dlinfer::renormalize")
+# def renormalize(
+#     topk_weights: Tensor,
+# ) -> Tensor:
+#     return vendor_ops_registry["renormalize"](topk_weights)
+
+
+# @register_custom_op("dlinfer::moe_init_routing")
+# def moe_init_routing(
+#     hidden_states: Tensor, topk_ids: Tensor, num_experts: int
+# ) -> Tuple[Tensor, Tensor, Tensor]:
+#     return vendor_ops_registry["moe_init_routing"](hidden_states, topk_ids, num_experts)
+
+
+# @register_custom_op("dlinfer::grouped_matmul")
+# def grouped_matmul(
+#     hidden_stages: Tensor, weights: Tensor, group: Tensor, split_item: int
+# ) -> Tensor:
+#     return vendor_ops_registry["grouped_matmul"](
+#         hidden_stages, weights, group, split_item
+#     )
+
+
+# @register_custom_op("dlinfer::moe_token_unpermute")
+# def moe_token_unpermute(
+#     x: Tensor, expanded_row_idx: Tensor, topk_weights: Tensor
+# ) -> Tensor:
+#     return vendor_ops_registry["moe_token_unpermute"](x, expanded_row_idx, topk_weights)
 
 
 @register_custom_op("dlinfer::fused_moe", ["hidden_states"])

@@ -407,6 +407,7 @@ class AtenToAtbTransformer(SingleOpTransformer):
     @register_conversion("torch.ops.dlinfer.add_rms_norm.default")
     def dlinfer_add_rms_norm(self, x1, x2, gamma, epsilon):
         add = self.get_proxy(atb_op.Add, (x1, x2))
+        self.graph_op_group = OrderedDict()
         if self.use_torch_npu_launcher and len(self.graph_op_group) > 0:
             op_tuple = tuple(self.graph_op_group.values())
             graph = self.get_proxy(atb_op.Graph, op_tuple, {"output": add})
@@ -583,7 +584,7 @@ class AtenToAtbTransformer(SingleOpTransformer):
         target_dim = dim if dim >= 0 else dim + len(x_shape) + 1
         x_shape.insert(target_dim, 1)
         x_shape = [str(x) for x in x_shape]
-        return self.get_proxy(atb_op.Unsqueeze, (x, dim, x_shape))
+        return self.get_proxy(atb_op.Unsqueeze, (x, dim))
 
     @register_conversion(torch.ops.aten.squeeze.dim)
     def squeeze(self, x, dim):
@@ -591,7 +592,7 @@ class AtenToAtbTransformer(SingleOpTransformer):
         target_dim = dim if dim >= 0 else dim + len(x_shape)
         x_shape.pop(target_dim)
         x_shape = [str(x) for x in x_shape]
-        return self.get_proxy(atb_op.Squeeze, (x, dim, x_shape))
+        return self.get_proxy(atb_op.Squeeze, (x, dim))
 
     @register_conversion(torch.ops.aten.select.int)
     def select_int(self, x, dim, index):
@@ -664,6 +665,66 @@ class AtenToAtbTransformer(SingleOpTransformer):
             dim += 1
         return x
 
+    # @register_conversion("torch.ops.dlinfer.renormalize.default")
+    # def dlinfer_renormalize(
+    #     self,
+    #     topk_weights,
+    # ):
+    #     reduce_dim = get_reduce_dim(topk_weights, -1)[0]
+    #     topk_weights = self.get_proxy(atb_op.Renormalize, (topk_weights, reduce_dim))
+    #     topk_weights = self.get_proxy(atb_op.GetItem, (topk_weights, 1))
+    #     return topk_weights
+
+    # @register_conversion("torch.ops.dlinfer.moe_init_routing.default")
+    # def dlinfer_moe_init_routing(
+    #     self,
+    #     hidden_states,
+    #     topk_ids,
+    #     num_experts,
+    # ):
+    #     moe_init = self.get_proxy(
+    #         atb_op.AclNnMoeInitRouting,
+    #         (hidden_states, topk_ids, num_experts),
+    #     )
+    #     expanded_hidden_states = self.get_proxy(atb_op.GetItem, (moe_init, 0))
+    #     expanded_row_idx = self.get_proxy(atb_op.GetItem, (moe_init, 1))
+    #     group = self.get_proxy(atb_op.GetItem, (moe_init, 2))
+    #     group = self.get_proxy(atb_op.Cast, (group, torch.int64))
+    #     return self.get_proxy(
+    #         atb_op.Tuple, (expanded_hidden_states, expanded_row_idx, group)
+    #     )
+
+    # @register_conversion("torch.ops.dlinfer.grouped_matmul.default")
+    # def dlinfer_grouped_matmul(
+    #     self,
+    #     x,
+    #     weights,
+    #     group,
+    #     split_item,
+    # ):
+    #     sample = self.get_proxy(
+    #         atb_op.AclNnGroupedMatmul,
+    #         (x, weights, group, 2),
+    #     )
+    #     proj = self.get_proxy(atb_op.GetItem, (sample, 0))
+    #     return proj
+
+    # @register_conversion("torch.ops.dlinfer.moe_token_unpermute.default")
+    # def dlinfer_moe_token_unpermute(
+    #     self,
+    #     x,
+    #     expanded_row_idx,
+    #     topk_weights,
+    # ):
+    #     return self.get_proxy(
+    #         atb_op.AclNnMoeTokenUnpermute,
+    #         (
+    #             x,
+    #             expanded_row_idx,
+    #             topk_weights,
+    #         ),
+    #     )
+
     @register_conversion("torch.ops.dlinfer.fused_moe.default")
     def dlinfer_fused_moe(
         self,
@@ -723,6 +784,10 @@ class AtenToAtbTransformer(SingleOpTransformer):
 
     @register_conversion("torch.ops.dlinfer.moe_gating_topk_softmax.default")
     def dlinfer_moe_gating_topk_softmax(self, router_logits, top_k):
+        # moe_gating_topk_softmax = self.get_proxy(atb_op.AclNnMoeGatingTopkSoftmax, (router_logits, top_k))
+        # topk_weight = self.get_proxy(atb_op.GetItem, (moe_gating_topk_softmax, 0))
+        # topk_idx = self.get_proxy(atb_op.GetItem, (moe_gating_topk_softmax, 1))
+        # return self.get_proxy(atb_op.Tuple, (topk_weight, topk_idx))
         return self.get_proxy(atb_op.AclNnMoeGatingTopkSoftmax, (router_logits, top_k))
 
     @register_conversion(torch.ops.aten.expand.default)

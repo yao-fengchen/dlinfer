@@ -400,7 +400,7 @@ class Unsqueeze(Operator):
     def __init__(self):
         super().__init__("Unsqueeze")
 
-    def infer_result(self, x, dim, target_shape=None):
+    def infer_result(self, x, dim):
         return x.unsqueeze(dim)
 
 
@@ -408,7 +408,7 @@ class Squeeze(Operator):
     def __init__(self):
         super().__init__("Squeeze")
 
-    def infer_result(self, x, dim, target_shape=None):
+    def infer_result(self, x, dim):
         return x.squeeze(dim)
 
 

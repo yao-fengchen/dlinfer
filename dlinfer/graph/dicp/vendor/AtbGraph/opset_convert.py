@@ -51,6 +51,8 @@ def preserve_meta_val():
 def atbgraph_opset_convert(
     gm: torch.fx.GraphModule,
 ):
+    print("**********", "aten ir", "**********", flush=True)
+    gm.print_readable()
     with preserve_meta_val():
         gm = ViewSymIntTransformer(gm).transform()
         gm.graph.eliminate_dead_code()
@@ -62,9 +64,13 @@ def atbgraph_opset_convert(
         atb_pattern_matcher, torch_patterns_cls_list_1
     ).transform(gm)
 
+    # print("**********", "aten ir before atb ir", "**********", flush=True)
+    # gm.print_readable()
     gm = AtenToAtbTransformer(gm).transform()
 
     # For bug in pytorch
     # Avoid for dynamic shape
     GraphTransformer.infer_shape_dtype(gm)
+    print("**********", "atb ir", "**********", flush=True)
+    gm.print_readable()
     return gm

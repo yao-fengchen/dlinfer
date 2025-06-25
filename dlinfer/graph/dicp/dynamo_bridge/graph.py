@@ -73,6 +73,11 @@ class GraphTransformer:
                     fake_value = n.target(*n.args, **n.kwargs)
                 except Exception as e:
                     raise RuntimeError(f"call function: {n.target} failed!")
+                if n.name.startswith("squeeze") or n.name.startswith("unsqueeze"):
+                    target_shape = [str(x) for x in fake_value.size()]
+                    args = list(n.args)
+                    args.append(target_shape)
+                    n.args = tuple(args)
             elif n.op == "get_attr":
                 target_atoms = n.target.split(".")
                 attr_itr = gm

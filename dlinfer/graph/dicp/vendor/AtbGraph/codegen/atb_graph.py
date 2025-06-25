@@ -307,8 +307,13 @@ def make_output_tensor_desc(
             "format": out_format,
         }
 
+    print(f"output_names: {output_names}", flush=True)
+    print(f"output_data_nodes: {output_data_nodes}", flush=True)
+    for k, v in optimized_graph.nodes.items():
+        print("item: ", k, v, flush=True)
     for idx, output in enumerate(output_data_nodes):
         output_name = output_names[idx]
+        print(f"output_name: {output_name}, output: {output}", flush=True)
         atb_op = optimized_graph.nodes.get(output_name).get("value")
         process_node(output_name, output, atb_op)
     return output_tensor_descs
@@ -655,6 +660,9 @@ class GraphOptimizer:
         processed_graph = copy.deepcopy(self.original_graph)
         for pass_instance in self.passes:
             processed_graph = pass_instance.run(processed_graph, self.context)
+            # print(f"dir info of processed_graph: {dir(processed_graph)}", flush=True)
+            print(f"processed_graph.nodes.key(): {processed_graph.nodes.keys()}", flush=True)
+            print(f"processed_graph.outputs: {processed_graph.outputs}", flush=True)
         return self._finalize_graph(processed_graph)
 
     def _collect_tensors(self, graph: Graph) -> tuple[Set[str], Set[str]]:

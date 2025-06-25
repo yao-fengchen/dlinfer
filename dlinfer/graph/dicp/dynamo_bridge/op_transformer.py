@@ -24,6 +24,7 @@ class OpSetTransformer:
 
 
 class SingleOpTransformer(torch.fx.Transformer):
+    placeholders = []
     def __init__(self, module, conversions):
         super().__init__(module)
         self._conversions = conversions
@@ -46,7 +47,20 @@ class SingleOpTransformer(torch.fx.Transformer):
                     st = dim.node.str()
                     if st not in self.sym_in_args:
                         self.sym_in_args[st] = (proxy, idx)
+        SingleOpTransformer.placeholders.append(proxy.node.name)
         return proxy
+
+    def output(self, target : 'Target', args : Tuple[Argument, ...], kwargs : Dict[str, Any]) -> Any:
+        # if args[0].name in SingleOpTransformer.placeholders:
+        #     return
+        print(f"SingleOpTransformer.placeholders: {SingleOpTransformer.placeholders}", flush=True)
+        print(f"args[0]: {args[0]}", flush=True)
+        new_args = []
+        for item in args[0]:
+            if item.node.name not in SingleOpTransformer.placeholders:
+                new_args.append(item)
+        return new_args
+        # return args[0]
 
     def get_proxy(
         self, target, args: Tuple[Argument, ...], kwargs: Dict[str, Any] = {}
