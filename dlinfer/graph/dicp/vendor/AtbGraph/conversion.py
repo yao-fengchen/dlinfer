@@ -193,6 +193,7 @@ class AtenToAtbTransformer(SingleOpTransformer):
             value_shape = value.node.meta["val"].shape
             is_mla = key_shape[-1] != value_shape[-1]
             if is_mla:
+                print(f"key_shape: {key_shape}, value_shape: {value_shape}, kcache_shape: {key_cache.node.meta['val'].shape}, vcache_shape: {value_cache.node.meta['val'].shape}", flush=True)
                 out = self.get_proxy(
                     atb_op.MlaReshapeAndCache,
                     (key, key_cache, kv_indices),
