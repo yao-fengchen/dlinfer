@@ -21,6 +21,7 @@ __all__ = [
     "get_cache_len",
     "weight_quant_matmul",
     "fused_moe",
+    "fused_moe_with_alltoall",
     "linear",
     "dynamic_quant",
     "linear_w8a8",
@@ -578,6 +579,49 @@ def fused_moe(
         topk_weights,
         topk_ids,
         topk,
+        renormalize,
+    )
+
+
+@register_custom_op("dlinfer::fused_moe_with_alltoall", ["hidden_states"])
+def fused_moe_with_alltoall(
+    hidden_states: Tensor,
+    gate_up_weights: Tensor,
+    down_weights: Tensor,
+    topk_weights: Tensor,
+    topk_ids: Tensor,
+    topk: int,
+    num_experts: int,
+    ep_size: int,
+    renormalize: bool,
+) -> Tensor:
+    """
+    Implement the Fused Mixture of Experts (MoE) model.
+
+    Args:
+        hidden_states (Tensor): The hidden_states tensor.
+        gate_up_weights (Tensor): The gate_up_weights tensor used to upsample.
+        down_weights (Tensor): The down_weights tensor used to downsample.
+        topk_weights (Tensor): The topk_weights tensor corresponds to the weight of experts in topk_ids.
+        topk_ids (Tensor): The IDs of the top K selected experts.
+        top_k (int): The number of top K experts selected among multiple experts.
+        num_experts (int): The number of experts.
+        ep_size (int): The number of expert parallelism.
+        renormalize (bool): A boolean flag to indicate whether to renormalize the output.
+
+    Returns:
+        Tensor: The output tensor of the Fused Mixture of Experts (MoE) model.
+
+    """
+    return vendor_ops_registry["fused_moe_with_alltoall"](
+        hidden_states,
+        gate_up_weights,
+        down_weights,
+        topk_weights,
+        topk_ids,
+        topk,
+        num_experts,
+        ep_size,
         renormalize,
     )
 
