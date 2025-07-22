@@ -28,6 +28,11 @@ __all__ = [
     "rms_norm_w8a8",
     "add_rms_norm_w8a8",
     "transdata",
+    "linear_ascend_w8a8",
+    "rms_norm_ascend_w8a8",
+    "linear_ascend_w8a8_dynamic",
+    "rms_norm_ascend_w8a8_with_scale_and_offset",
+    "fused_moe_ascend_w8a8",
 ]
 
 
@@ -583,6 +588,51 @@ def fused_moe(
     )
 
 
+@register_custom_op("dlinfer::fused_moe_ascend_w8a8", ["hidden_states"])
+def fused_moe_ascend_w8a8(
+    hidden_states: Tensor,
+    gate_up_weights: Tensor,
+    gate_up_scale: Tensor,
+    down_weights: Tensor,
+    down_scale: Tensor,
+    topk_weights: Tensor,
+    topk_ids: Tensor,
+    topk: int,
+    num_experts: int,
+    ep_size: int,
+    renormalize: bool,
+) -> Tensor:
+    """
+    Implement the Fused Mixture of Experts (MoE) model.
+
+    Args:
+        hidden_states (Tensor): The hidden_states tensor.
+        top_k (int): The number of top K experts selected among multiple experts.
+        topk_ids (Tensor): The IDs of the top K selected experts.
+        topk_weights (Tensor): The topk_weights tensor corresponds to the weight of experts in topk_ids.
+        gate_up_weights (Tensor): The gate_up_weights tensor used to upsample.
+        down_weights (Tensor): The down_weights tensor used to downsample.
+        renormalize (bool): A boolean flag to indicate whether to renormalize the output.
+
+    Returns:
+        Tensor: The output tensor of the Fused Mixture of Experts (MoE) model.
+
+    """
+    return vendor_ops_registry["fused_moe_ascend_w8a8"](
+        hidden_states,
+        gate_up_weights,
+        gate_up_scale,
+        down_weights,
+        down_scale,
+        topk_weights,
+        topk_ids,
+        topk,
+        num_experts,
+        ep_size,
+        renormalize,
+    )
+
+
 @register_custom_op("dlinfer::fused_moe_with_alltoall", ["hidden_states"])
 def fused_moe_with_alltoall(
     hidden_states: Tensor,
@@ -881,3 +931,175 @@ def transdata(
        Tensor : A tensor in target format.
     """
     return vendor_ops_registry["transdata"](hidden_states, transdata_type)
+
+
+def rms_norm_ascend_w8a8_impl_abstract_func(
+    hidden_states: Tensor,
+    weight: Tensor,
+    bias: Tensor,
+    epsilon: float,
+    quant_dtype: torch.dtype,
+    input_scale: Tensor,
+    input_offset: Tensor,
+) -> Tensor:
+    return hidden_states.to(quant_dtype)
+
+
+@register_custom_op(
+    "dlinfer::rms_norm_ascend_w8a8",
+    impl_abstract_func=rms_norm_ascend_w8a8_impl_abstract_func,
+)
+def rms_norm_ascend_w8a8(
+    hidden_states: Tensor,
+    weight: Tensor,
+    bias: Tensor,
+    epsilon: float,
+    quant_dtype: torch.dtype,
+    input_scale: Tensor,
+    input_offset: Tensor,
+) -> Tensor:
+    """
+    Apply RMS normalization to the input tensor, adds a residual connection,
+    and quantizes the result.
+
+    Args:
+        hidden_states (Tensor): The input tensor to be normalized and quantized.
+        residual (Tensor): The residual tensor to be added to the normalized tensor.
+        weight (Tensor): The scaling weight applied to the normalized tensor.
+        epsilon (float): A value added to the denominator for numerical stability during normalization.
+        quant_dtype (torch.dtype): The target data type for the quantized result.
+
+    Returns:
+        Tuple[Tensor, Tensor, Tensor]: A tuple containing:
+            - The RMS-normalized, residual-added, and quantized tensor.
+            - The scaling factor used during quantization.
+            - The residual tensor.
+    """
+    return vendor_ops_registry["rms_norm_ascend_w8a8"](
+        hidden_states, weight, bias, epsilon, quant_dtype
+    )
+
+
+def linear_ascend_w8a8_impl_abstract_func(
+    x: Tensor,
+    weight: Tensor,
+    input_scale: Tensor,
+    input_offset: Tensor,
+    quant_bias: Tensor,
+    deq_scale: Tensor,
+    bias: Tensor,
+    quanted_x: bool,
+    allreduce: bool,
+    group: str,
+) -> Tensor:
+    res_shape = torch.matmul(x, weight.to(x.dtype).transpose(-1, -2)).shape
+    if quanted_x:
+        return x.new_empty(res_shape, dtype=torch.bfloat16)
+    return x.new_empty(res_shape, dtype=x.dtype)
+
+
+@register_custom_op(
+    "dlinfer::linear_ascend_w8a8",
+    impl_abstract_func=linear_ascend_w8a8_impl_abstract_func,
+    default_value={"bias": None, "quanted_x": False, "allreduce": False, "group": ""},
+)
+def linear_ascend_w8a8(
+    x: Tensor,
+    weight: Tensor,
+    input_scale: Tensor,
+    input_offset: Tensor,
+    quant_bias: Tensor,
+    deq_scale: Tensor,
+    bias: Tensor,
+    quanted_x: bool,
+    allreduce: bool,
+    group: str,
+) -> Tensor:
+    return vendor_ops_registry["linear_ascend_w8a8"](
+        x,
+        weight,
+        input_scale,
+        input_offset,
+        quant_bias,
+        deq_scale,
+        bias,
+        quanted_x,
+        allreduce,
+        group,
+    )
+
+
+def linear_ascend_w8a8_dynamic_impl_abstract_func(
+    x: Tensor,
+    weight: Tensor,
+    scale: Tensor,
+    offset: Tensor,
+    bias: Tensor,
+) -> Tensor:
+    return torch.matmul(x, weight.t().to(x.dtype))
+    # return x.new_empty(x.shape[:-1] + weight.shape[-2:-1], dtype=torch.bfloat16)
+
+
+# @register_custom_op(
+#     "dlinfer::linear_ascend_w8a8_dynamic",
+#     impl_abstract_func=linear_ascend_w8a8_dynamic_impl_abstract_func,
+#     default_value={"bias": None, "out_dtype": None},
+# )
+def linear_ascend_w8a8_dynamic(
+    x: Tensor,
+    weight: Tensor,
+    scale: Tensor,
+    offset: Tensor,
+    bias: Tensor,
+    out_dtype: torch.dtype,
+) -> Tensor:
+    return vendor_ops_registry["linear_ascend_w8a8_dynamic"](
+        x, weight, scale, offset, bias, out_dtype
+    )
+
+
+def rms_norm_ascend_w8a8_with_scale_and_offset_impl_abstract_func(
+    hidden_states: Tensor,
+    weight: Tensor,
+    bias: Tensor,
+    scale: Tensor,
+    offset: Tensor,
+    epsilon: float,
+    quant_dtype: torch.dtype,
+) -> Tensor:
+    return hidden_states
+
+
+@register_custom_op(
+    "dlinfer::rms_norm_ascend_w8a8_with_scale_and_offset",
+    impl_abstract_func=rms_norm_ascend_w8a8_with_scale_and_offset_impl_abstract_func,
+)
+def rms_norm_ascend_w8a8_with_scale_and_offset(
+    hidden_states: Tensor,
+    weight: Tensor,
+    bias: Tensor,
+    scale: Tensor,
+    offset: Tensor,
+    epsilon: float,
+    quant_dtype: torch.dtype,
+) -> Tensor:
+    """
+    Apply RMS normalization to the input tensor, adds a residual connection,
+    and quantizes the result.
+
+    Args:
+        hidden_states (Tensor): The input tensor to be normalized and quantized.
+        residual (Tensor): The residual tensor to be added to the normalized tensor.
+        weight (Tensor): The scaling weight applied to the normalized tensor.
+        epsilon (float): A value added to the denominator for numerical stability during normalization.
+        quant_dtype (torch.dtype): The target data type for the quantized result.
+
+    Returns:
+        Tuple[Tensor, Tensor, Tensor]: A tuple containing:
+            - The RMS-normalized, residual-added, and quantized tensor.
+            - The scaling factor used during quantization.
+            - The residual tensor.
+    """
+    return vendor_ops_registry["rms_norm_ascend_w8a8_with_scale_and_offset"](
+        hidden_states, weight, bias, scale, offset, epsilon, quant_dtype
+    )

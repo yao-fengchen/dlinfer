@@ -27,6 +27,11 @@ __all__ = [
     "fused_moe",
     "fused_moe_with_alltoall",
     "linear",
+    "dynamic_quant",
+    "linear_ascend_w8a8_dynamic",
+    "quant_per_tensor",
+    "linear_ascend_w8a8",
+    "fused_moe_ascend_w8a8",
 ]
 
 
@@ -71,6 +76,24 @@ def apply_rotary_pos_emb(
     return torch.ops.npu.npu_apply_rotary_pos_emb(query, key, cos, sin, "BSND")
 
 
+import pickle
+
+
+def dump_tensor(tensor, name):
+    with open(
+        f"/mnt/cwai/dev/yaofengchen/dlinfer_dev/demo/tensors/{name}.pkl", "wb"
+    ) as f:
+        pickle.dump(tensor.cpu(), f)
+
+
+def load_tensor(name):
+    with open(
+        f"/mnt/cwai/dev/yaofengchen/dlinfer_dev/demo/tensors/{name}.pkl", "rb"
+    ) as f:
+        loaded_tensor = pickle.load(f)
+    return loaded_tensor
+
+
 @register_ops(vendor_ops_registry)
 def prefill_attention(
     query: Tensor,
@@ -112,6 +135,17 @@ def prefill_attention(
             if (attn_mask is None or len(attn_mask) == 0)
             else attn_mask[0].to(torch.bool)
         )
+        # attn_output = attn_output.contiguous()
+        # torch_npu._npu_flash_attention(
+        #     query=query,
+        #     key=key,
+        #     value=value,
+        #     mask=attn_mask_.to(query.dtype),
+        #     seq_len=q_seq_len.to(torch.int32),
+        #     scale_value=scale_value,
+        #     num_heads=num_q_heads,
+        #     num_kv_heads=num_q_heads,
+        #     out=attn_output)
         attn_output[:] = torch.ops.npu.npu_fusion_attention(
             query,
             key,
@@ -368,6 +402,16 @@ def rms_norm(hidden_states: Tensor, weight: Tensor, epsilon: float) -> Tensor:
 @register_ops(vendor_ops_registry)
 def silu_and_mul(input_tensor: Tensor, dim: int) -> Tensor:
     if SocVersion.is_Ascend910B():
+        if isinstance(input_tensor, tuple):
+            quantized_x, dynamic_scale, weight_scale = input_tensor
+            y, scale = torch.ops.npu.npu_dequant_swiglu_quant(
+                x=quantized_x,
+                weight_scale=weight_scale,
+                activation_scale=dynamic_scale,
+                activate_left=True,
+                quant_mode=1,
+            )
+            return (y, scale)
         return torch.ops.npu.npu_swiglu(input_tensor, dim)
     elif SocVersion.is_Ascend310P():
         gate_cache, up_cache = input_tensor.chunk(2, dim)
@@ -490,6 +534,9 @@ def fused_moe(
     topk: int,
     renormalize: bool,
 ) -> Tensor:
+    import pdb
+
+    pdb.set_trace()
     seq_length = hidden_states.size(0)
     num_experts = gate_up_weights.size(0)
     active_num = hidden_states.size(0)
@@ -564,6 +611,18 @@ def fused_moe_with_alltoall(
     ep_size: int,
     renormalize: bool,
 ):
+    from lmdeploy.utils import get_logger
+
+    logger = get_logger("lmdploy")
+    logger.info(
+        f"hidden_states.shape: {hidden_states.shape}, w1.shape: {w1.shape}, w2.shape: {w2.shape}"
+    )
+    logger.info(
+        f"topk_weights.shape: {topk_weights.shape}, topk_ids.shape: {topk_ids.shape}"
+    )
+    logger.info(
+        f"topk: {topk}, num_expers: {num_experts}, ep_size: {ep_size}, renormalize: {renormalize}"
+    )
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
     if not topk_weights.is_contiguous():
@@ -590,10 +649,16 @@ def fused_moe_with_alltoall(
             active_num=seq_length,
         )
     )
+    logger.info(
+        f"hidden_states.shape: {hidden_states.shape}, expanded_row_idx: {expanded_row_idx}, expanded_expert_idx: {expanded_expert_idx}"
+    )
 
     # dispatch
     global_expert_tokens = torch.bincount(expanded_expert_idx, minlength=num_experts)
     scatter_sizes = global_expert_tokens.view(ep_size, -1).sum(-1)
+    logger.info(
+        f"global_expert_tokens: {global_expert_tokens}, scatter_sizes: {scatter_sizes}"
+    )
 
     gather_sizes = torch.empty_like(scatter_sizes)
     dist.all_to_all_single(gather_sizes, scatter_sizes)
@@ -618,7 +683,7 @@ def fused_moe_with_alltoall(
     # up sample
     sorted_local_expert_idx, sorted_idx = torch.sort(local_expert_idx)
 
-    expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
+    expert_tokens = torch.ops.npu.npu_moe_compute_expert_tokens(
         sorted_local_expert_idx, local_num_experts
     ).to(torch.int64)
 
@@ -658,7 +723,7 @@ def fused_moe_with_alltoall(
     hidden_states = original_hidden_states
 
     # moe finalize routing
-    final_hidden_states = torch_npu.npu_moe_finalize_routing(
+    final_hidden_states = torch.ops.npu.npu_moe_finalize_routing(
         hidden_states,
         skip1=None,
         skip2=None,
@@ -713,3 +778,318 @@ def transdata(
     transdata_type: int,
 ):
     raise NotImplementedError("transdata in eager mode is not implemented yet!")
+
+
+@register_ops(vendor_ops_registry)
+def dynamic_quant(x: Tensor):
+    x = x.unsqueeze(0) if len(x.shape) == 1 else x
+    quantized_x, dynamic_scale = torch.ops.npu.npu_dynamic_quant(x)
+    dynamic_scale = (
+        dynamic_scale.squeeze() if len(dynamic_scale.size()) != 1 else dynamic_scale
+    )
+    dynamic_scale = (
+        dynamic_scale.unsqueeze(0) if len(dynamic_scale.shape) == 0 else dynamic_scale
+    )
+    return quantized_x, dynamic_scale
+
+
+@register_ops(vendor_ops_registry)
+def linear_ascend_w8a8_dynamic(
+    x: Tensor,
+    weight: Tensor,
+    weight_scale: Tensor,
+    offset: Tensor,
+    bias: Tensor,
+    out_dtype: torch.dtype,
+):
+    weight = weight.transpose(0, 1)
+    if isinstance(x, tuple):
+        quantized_x, dynamic_scale = x
+        x1_shape = quantized_x.shape
+        x2_shape = weight.shape
+        output_shape = quantized_x.shape
+        if len(x2_shape) == 1:
+            assert x1_shape[-1] == x2_shape[-1]
+        elif len(x2_shape) == 2:
+            output_shape = x1_shape[:-1] + x2_shape[-1:]
+        else:
+            raise NotImplementedError("not implememted output_shape")
+        quantized_x = (
+            quantized_x.squeeze().unsqueeze(0)
+            if len(quantized_x.squeeze().shape) == 1
+            else quantized_x.squeeze()
+        )
+        dynamic_scale = (
+            dynamic_scale.squeeze() if len(dynamic_scale.size()) != 1 else dynamic_scale
+        )
+        dynamic_scale = (
+            dynamic_scale.unsqueeze(0)
+            if len(dynamic_scale.shape) == 0
+            else dynamic_scale
+        )
+    else:
+        x1_shape = x.shape
+        x2_shape = weight.shape
+        output_shape = x.shape
+        if len(x2_shape) == 1:
+            assert x1_shape[-1] == x2_shape[-1]
+        elif len(x2_shape) == 2:
+            output_shape = x1_shape[:-1] + x2_shape[-1:]
+        else:
+            raise NotImplementedError("not implememted output_shape")
+        quantized_x, dynamic_scale = dynamic_quant(x.squeeze())
+    pertoken_scale = None if out_dtype is torch.int32 else dynamic_scale
+    weight = weight.contiguous()
+    weight.data = torch_npu.npu_format_cast(weight.data, 29)
+    output = torch.ops.npu.npu_quant_matmul(
+        quantized_x,
+        weight,
+        weight_scale.squeeze(1),
+        pertoken_scale=pertoken_scale,
+        bias=bias,
+        output_dtype=out_dtype,
+    ).view(output_shape)
+
+    if out_dtype is torch.int32:
+        return (output, dynamic_scale, weight_scale.squeeze().to(torch.float32))
+    return output
+
+
+@register_ops(vendor_ops_registry)
+def quant_per_tensor(
+    in_tensor: torch.Tensor,
+    input_scale: torch.Tensor,
+    input_offset: torch.Tensor,
+    function=False,
+):
+    return torch.ops.npu.npu_quantize(
+        in_tensor, input_scale, input_offset, torch.qint8, -1, function
+    )
+
+
+@register_ops(vendor_ops_registry)
+def linear_ascend_w8a8(
+    x: Tensor,
+    weight: Tensor,
+    input_scale: Tensor,
+    input_offset: Tensor,
+    quant_bias: Tensor,
+    deq_scale: Tensor,
+    bias=None,
+):
+    original_dtype = x.dtype
+    if original_dtype != torch.int8:
+        x = quant_per_tensor(x, input_scale, input_offset)
+    weight = weight.contiguous()
+    weight.data = torch_npu.npu_format_cast(weight.data, 29)
+    output = torch.ops.npu.npu_quant_matmul(
+        x,
+        weight,
+        deq_scale,
+        bias=quant_bias,
+        output_dtype=original_dtype,
+    )
+    return output
+
+
+def dispose_tensor(x: torch.Tensor):
+    x.set_(torch.empty((0,), device=x.device, dtype=x.dtype))
+
+
+def apply_mlp(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    group_list: torch.Tensor,
+    dynamic_scale: torch.Tensor = None,
+    group_list_type: int = 1,
+) -> torch.Tensor:
+    if dynamic_scale is None:
+        unquantized_hidden_states = hidden_states
+        hidden_states, pertoken_scale = torch.ops.npu.npu_dynamic_quant(hidden_states)
+        # Dispose the original unquantized hidden states
+        # to save npu memory because they're no longer used.
+        dispose_tensor(unquantized_hidden_states)
+    else:
+        pertoken_scale = dynamic_scale
+
+    # gmm1: gate_up_proj
+    hidden_states = torch.ops.npu.npu_grouped_matmul(
+        x=[hidden_states],
+        weight=[w1],
+        scale=[w1_scale],
+        per_token_scale=[pertoken_scale],
+        split_item=2,
+        group_list_type=group_list_type,
+        group_type=0,
+        group_list=group_list,
+        output_dtype=w2_scale.dtype,
+    )[0]
+
+    # act_fn: swiglu
+    hidden_states = torch.ops.npu.npu_swiglu(hidden_states)
+    hidden_states, swiglu_out_scale = torch.ops.npu.npu_dynamic_quant(hidden_states)
+
+    # gmm2: down_proj
+    hidden_states = torch.ops.npu.npu_grouped_matmul(
+        x=[hidden_states],
+        weight=[w2],
+        scale=[w2_scale],
+        per_token_scale=[swiglu_out_scale],
+        split_item=2,
+        group_list_type=group_list_type,
+        group_type=0,
+        group_list=group_list,
+        output_dtype=w2_scale.dtype,
+    )[0]
+
+    return hidden_states
+
+
+@register_ops(vendor_ops_registry)
+def fused_moe_ascend_w8a8(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk: int,
+    num_experts: int = 1,
+    ep_size: int = 1,
+    renormalize: bool = False,
+):
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    if not topk_weights.is_contiguous():
+        topk_weights = topk_weights.contiguous()
+
+    original_shape = hidden_states.shape
+    if len(original_shape) == 3:
+        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+    seq_length, _ = hidden_states.shape
+
+    if ep_size != 1:
+        # moe init routing
+        local_num_experts = num_experts // ep_size
+        row_idx = (
+            torch.arange(
+                seq_length * topk, dtype=torch.int32, device=hidden_states.device
+            )
+            .view((topk, seq_length))
+            .transpose(0, 1)
+            .contiguous()
+        )
+        hidden_states, expanded_row_idx, expanded_expert_idx = (
+            torch.ops.npu.npu_moe_init_routing(
+                hidden_states,
+                row_idx=row_idx,
+                expert_idx=topk_ids.to(torch.int32),
+                active_num=seq_length,
+            )
+        )
+
+        # dispatch
+        global_expert_tokens = torch.bincount(
+            expanded_expert_idx, minlength=num_experts
+        )
+        scatter_sizes = global_expert_tokens.view(ep_size, -1).sum(-1)
+
+        gather_sizes = torch.empty_like(scatter_sizes)
+        dist.all_to_all_single(gather_sizes, scatter_sizes)
+        scatter_size_list = scatter_sizes.cpu().tolist()
+        gather_size_list = gather_sizes.cpu().tolist()
+
+        expanded_expert_idx = expanded_expert_idx % local_num_experts
+        original_hidden_states = hidden_states
+        hidden_states = original_hidden_states.new_empty(
+            (np.sum(np.array(gather_size_list)),) + hidden_states.shape[1:]
+        )
+        dist.all_to_all_single(
+            hidden_states, original_hidden_states, gather_size_list, scatter_size_list
+        )
+        local_expert_idx = expanded_expert_idx.new_empty(
+            (np.sum(np.array(gather_size_list)),) + expanded_expert_idx.shape[1:]
+        )
+        dist.all_to_all_single(
+            local_expert_idx, expanded_expert_idx, gather_size_list, scatter_size_list
+        )
+
+        sorted_local_expert_idx, sorted_idx = torch.sort(local_expert_idx)
+
+        expert_tokens = torch.ops.npu.npu_moe_compute_expert_tokens(
+            sorted_local_expert_idx, local_num_experts
+        ).to(torch.int64)
+
+        hidden_states = hidden_states[sorted_idx]
+        group_list_type = 0
+    else:
+        row_idx_len = seq_length * topk
+        row_idx = (
+            torch.arange(0, row_idx_len, dtype=torch.int32, device=topk_weights.device)
+            .view(topk, -1)
+            .permute(1, 0)
+            .contiguous()
+        )
+        hidden_states, expanded_row_idx, expanded_expert_idx = (
+            torch.ops.npu.npu_moe_init_routing(
+                hidden_states,
+                row_idx=row_idx,
+                expert_idx=topk_ids.to(torch.int32),
+                active_num=seq_length,
+            )
+        )
+
+        expert_tokens = torch.ops.npu.npu_moe_compute_expert_tokens(
+            expanded_expert_idx, num_experts
+        )
+        expert_tokens = expert_tokens.to(torch.int64)
+        group_list_type = 0
+
+    # mlp
+    hidden_states = apply_mlp(
+        hidden_states,
+        w1,
+        w1_scale.squeeze(),  # 17
+        w2,
+        w2_scale.squeeze(),
+        expert_tokens,  # 16
+        group_list_type=group_list_type,
+    )
+
+    if ep_size != 1:
+        # combine
+        resorted_idx = torch.argsort(sorted_idx)
+        hidden_states = hidden_states[resorted_idx]
+        dist.all_to_all_single(
+            original_hidden_states, hidden_states, scatter_size_list, gather_size_list
+        )
+        hidden_states = original_hidden_states
+
+        # moe finalize routing
+        final_hidden_states = torch.ops.npu.npu_moe_finalize_routing(
+            hidden_states,
+            skip1=None,
+            skip2=None,
+            bias=None,
+            scales=topk_weights,
+            expanded_src_to_dst_row=expanded_row_idx,
+            export_for_source_row=topk_ids,
+        )
+    else:
+        final_hidden_states = torch.ops.npu.npu_moe_finalize_routing(
+            hidden_states,
+            skip1=None,
+            skip2=None,
+            bias=None,
+            scales=topk_weights,
+            expanded_src_to_dst_row=expanded_row_idx,
+            export_for_source_row=topk_ids,
+        )
+
+    if len(original_shape) == 3:
+        final_hidden_states = final_hidden_states.view(original_shape)
+    return final_hidden_states
