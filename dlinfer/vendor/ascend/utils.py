@@ -4,7 +4,7 @@ import torch
 
 class SocVersion:
     Ascend310P: str = "Ascend310P"
-    Ascend910B: str = "Ascend910B"
+    Ascend910B: str = "Ascend910"
 
     @classmethod
     @lru_cache(maxsize=1)

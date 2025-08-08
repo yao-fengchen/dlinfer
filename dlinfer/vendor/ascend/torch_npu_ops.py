@@ -21,6 +21,7 @@ __all__ = [
     "get_cache_len",
     "weight_quant_matmul",
     "fused_moe",
+    "fused_moe_with_alltoall",
     "linear",
 ]
 
@@ -489,15 +490,17 @@ def fused_moe(
     )
 
     # up sample
-    counts = torch.bincount(expanded_expert_idx, minlength=num_experts)
-    cumulative_counts = torch.cumsum(counts, dim=0)
-    group_list = cumulative_counts.tolist()
+    group_list = torch.ops.npu.npu_moe_compute_expert_tokens(
+        expanded_expert_idx, num_experts
+    ).to(torch.int64)
     up_proj = torch.ops.npu.npu_grouped_matmul(
         [expanded_hidden_states],
-        [weight for weight in gate_up_weights],
+        [gate_up_weights],
         bias=None,
         group_list=group_list,
         split_item=2,
+        group_type=0,
+        group_list_type=0,
     )[0]
 
     # activation
@@ -506,27 +509,147 @@ def fused_moe(
     # down sample
     down_proj = torch.ops.npu.npu_grouped_matmul(
         [gate_cache],
-        [weight for weight in down_weights],
+        [down_weights],
         bias=None,
         group_list=group_list,
         split_item=2,
+        group_type=0,
+        group_list_type=0,
     )[0]
 
     # moe finalize routing
-    skip = torch.zeros_like(hidden_states)
-    bias = torch.zeros_like(down_proj)
-    export_for_source_row = torch.zeros_like(topk_ids)
     moe_output = torch.ops.npu.npu_moe_finalize_routing(
         down_proj,
-        skip1=skip,
-        skip2=skip,
-        bias=bias,
+        skip1=None,
+        skip2=None,
+        bias=None,
         scales=topk_weights,
         expanded_src_to_dst_row=expanded_row_idx,
-        export_for_source_row=export_for_source_row,
+        export_for_source_row=topk_ids,
     )
 
     return moe_output
+
+
+@register_ops(vendor_ops_registry)
+def fused_moe_with_alltoall(
+    hidden_states: torch.Tensor,
+    gate_up_weights: torch.Tensor,
+    down_weights: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk: int,
+    num_experts: int,
+    ep_size: int,
+    renormalize: bool,
+):
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    if not topk_weights.is_contiguous():
+        topk_weights = topk_weights.contiguous()
+
+    original_shape = hidden_states.shape
+    if len(original_shape) == 3:
+        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+
+    # moe init routing
+    seq_length, _ = hidden_states.shape
+    local_num_experts = num_experts // ep_size
+    row_idx = (
+        torch.arange(seq_length * topk, dtype=torch.int32, device=hidden_states.device)
+        .view((topk, seq_length))
+        .transpose(0, 1)
+        .contiguous()
+    )
+    hidden_states, expanded_row_idx, expanded_expert_idx = (
+        torch.ops.npu.npu_moe_init_routing(
+            hidden_states,
+            row_idx=row_idx,
+            expert_idx=topk_ids.to(torch.int32),
+            active_num=seq_length,
+        )
+    )
+
+    # dispatch
+    global_expert_tokens = torch.bincount(expanded_expert_idx, minlength=num_experts)
+    scatter_sizes = global_expert_tokens.view(ep_size, -1).sum(-1)
+
+    gather_sizes = torch.empty_like(scatter_sizes)
+    dist.all_to_all_single(gather_sizes, scatter_sizes)
+    scatter_size_list = scatter_sizes.cpu().tolist()
+    gather_size_list = gather_sizes.cpu().tolist()
+
+    expanded_expert_idx = expanded_expert_idx % local_num_experts
+    original_hidden_states = hidden_states
+    hidden_states = original_hidden_states.new_empty(
+        (np.sum(np.array(gather_size_list)),) + hidden_states.shape[1:]
+    )
+    dist.all_to_all_single(
+        hidden_states, original_hidden_states, gather_size_list, scatter_size_list
+    )
+    local_expert_idx = expanded_expert_idx.new_empty(
+        (np.sum(np.array(gather_size_list)),) + expanded_expert_idx.shape[1:]
+    )
+    dist.all_to_all_single(
+        local_expert_idx, expanded_expert_idx, gather_size_list, scatter_size_list
+    )
+
+    # up sample
+    sorted_local_expert_idx, sorted_idx = torch.sort(local_expert_idx)
+
+    expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
+        sorted_local_expert_idx, local_num_experts
+    ).to(torch.int64)
+
+    hidden_states = hidden_states[sorted_idx]
+
+    gate_up_out_list = torch.ops.npu.npu_grouped_matmul(
+        x=[hidden_states],
+        weight=[gate_up_weights],
+        split_item=2,
+        group_list_type=0,
+        group_type=0,
+        group_list=expert_tokens,
+    )[0]
+
+    # TODO: Remove this in the future.
+    # activation
+    # hidden_states = torch.cat(gate_up_out_list, dim=0)
+    hidden_states = torch.ops.npu.npu_swiglu(hidden_states)
+
+    # down sample
+    down_out_list = torch.ops.npu.npu_grouped_matmul(
+        x=[hidden_states],
+        weight=[down_weights],
+        split_item=2,
+        group_list_type=0,
+        group_type=0,
+        group_list=expert_tokens,
+    )
+
+    # combine
+    hidden_states = torch.cat(down_out_list, dim=0)
+    resorted_idx = torch.argsort(sorted_idx)
+    hidden_states = hidden_states[resorted_idx]
+    dist.all_to_all_single(
+        original_hidden_states, hidden_states, scatter_size_list, gather_size_list
+    )
+    hidden_states = original_hidden_states
+
+    # moe finalize routing
+    final_hidden_states = torch_npu.npu_moe_finalize_routing(
+        hidden_states,
+        skip1=None,
+        skip2=None,
+        bias=None,
+        scales=topk_weights,
+        expanded_src_to_dst_row=expanded_row_idx,
+        export_for_source_row=topk_ids,
+    )
+
+    if len(original_shape) == 3:
+        final_hidden_states = final_hidden_states.view(original_shape)
+    return final_hidden_states
 
 
 @register_ops(vendor_ops_registry)

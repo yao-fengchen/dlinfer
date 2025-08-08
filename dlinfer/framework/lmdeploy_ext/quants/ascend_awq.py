@@ -7,7 +7,7 @@ from lmdeploy.lite.quantization.modules.linear import WeightOnlyQLinear
 from lmdeploy.lite.utils.cal_qparams import QParams
 from lmdeploy.pytorch.distributed import get_world_rank
 from lmdeploy.pytorch.nn.linear import (
-    _chunk_align,
+    # _chunk_align,
     MergedAwqLinear,
     AwqLinear,
     QKVAwqLinear,

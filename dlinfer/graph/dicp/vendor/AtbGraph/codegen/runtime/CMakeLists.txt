@@ -19,7 +19,7 @@ set(COMPILE_OPTIONS
     -Wno-unused-variable
     -Wno-unused-parameter
     -Wno-attributes
-    -D_GLIBCXX_USE_CXX11_ABI=0
+    #-D_GLIBCXX_USE_CXX11_ABI=1
 )
 
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O2")

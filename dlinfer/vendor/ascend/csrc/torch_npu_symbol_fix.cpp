@@ -52,5 +52,18 @@ std::string handleDeviceError(int errorCode) {
     return "";
 }
 #endif
+std::string handleDeviceError(int errorCode) {
+    throw std::runtime_error(
+        "Dlinfer record_mem_hbm_ecc_error should not be called. "
+        "Please check your environment setup.");
+    return "";
+}
+namespace option {
+bool OptionsManager::IsCompactErrorOutput() {
+    throw std::runtime_error(
+        "Dlinfer record_mem_hbm_ecc_error should not be called. "
+        "Please check your environment setup.");
+}
+}  // namespace option
 
 }  // namespace c10_npu
