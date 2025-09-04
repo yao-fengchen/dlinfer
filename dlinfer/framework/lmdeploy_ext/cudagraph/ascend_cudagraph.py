@@ -8,6 +8,10 @@ from lmdeploy.pytorch.models.utils.cudagraph import CudaGraphMeta
 from lmdeploy.pytorch.models.utils.cudagraph import CudaGraphMixin, next_power_of_2
 
 BuffType = Dict[str, Tensor]
+import torch_npu, torchair
+import logging
+
+
 
 '''
 this file implements the cudagraph for ascend backend.
@@ -152,7 +156,7 @@ from lmdeploy.pytorch.model_inputs import StepContext, get_step_ctx_manager
 from lmdeploy.pytorch.models.utils.cudagraph import CudaGraphMeta
 from lmdeploy.utils import get_logger
 
-from ..graph_runner import GraphRunner
+from lmdeploy.pytorch.backends.graph_runner import GraphRunner
 
 logger = get_logger('lmdeploy')
 
@@ -230,40 +234,46 @@ class AscendSingleGraphRunner:
         self.pool = pool
         self._graph: torch.cuda.CUDAGraph = None
 
+        self.torchair_config = torchair.CompilerConfig()
+        self.torchair_config.mode = "reduce-overhead"
+        self.npu_backend = torchair.get_npu_backend(compiler_config=self.torchair_config)
+
     @record_function('capture_cudagraph')
     def capture(self, **kwargs):
         """Capture graph."""
         logger.debug(f'Capturing graph with meta: {self.meta}')
-        self.meta.input_buffers = self.model.make_buffers_cudagraph(self.meta, **kwargs)
-        padded_kwargs = self.model.fill_buffers_cudagraph(self.meta, **kwargs)
+        # self.meta.input_buffers = self.model.make_buffers_cudagraph(self.meta, **kwargs)
+        # padded_kwargs = self.model.fill_buffers_cudagraph(self.meta, **kwargs)
         context = self.ctx_mgr.current_context()
-        self.model.update_context_cudagraph(self.meta, context)
+        # self.model.update_context_cudagraph(self.meta, context)
         current_stream = torch.cuda.current_stream()
 
         # warmup
-        self.model(**padded_kwargs)
-
-        self._graph = torch.cuda.CUDAGraph()
+        # output = self.model(**kwargs)
+        self.model = torch.compile(self.model, fullgraph=True, dynamic=True, backend=self.npu_backend)
+        
+        # self._graph = torch.cuda.CUDAGraph()
         # unsafe kernel call in other thread might invalid the capture
         # so we set thread_safe capture mode here.
-        with torch.cuda.graph(self._graph, pool=self.pool, stream=current_stream, capture_error_mode='thread_local'):
-            output = self.model(**padded_kwargs)
+        # with torch.cuda.graph(self._graph, pool=self.pool, stream=current_stream, capture_error_mode='thread_local'):
+        #     output = self.model(**padded_kwargs)
 
-        output_buffers = dict(logits=output)
-        self.meta.output_buffers = output_buffers
-        return output
+        # output_buffers = dict(logits=output)
+        # self.meta.output_buffers = output_buffers
+        # return output
 
     @record_function('forward_cudagraph')
     def forward(self, **kwargs):
         """forward."""
+ 
         num_tokens = kwargs['input_ids'].size(-1)
         assert self._graph is not None
         self.model.fill_buffers_cudagraph(self.meta, **kwargs)
         context = self.ctx_mgr.current_context()
         self.model.update_context_cudagraph(self.meta, context)
         self._graph.replay()
-
-        output = self.meta.output_buffers['logits'][:, :num_tokens]
+        output = self.model(**kwargs)
+        # output = self.meta.output_buffers['logits'][:, :num_tokens]
         return output
 
     def __del__(self):
@@ -271,7 +281,7 @@ class AscendSingleGraphRunner:
         del self._graph
 
 
-class CUDAGraphRunner(GraphRunner):
+class AscendGraphRunner(GraphRunner):
     """Cuda graph runner."""
 
     def __init__(self, model: torch.nn.Module, model_config: ModelConfig, cache_config: CacheConfig,
@@ -284,7 +294,7 @@ class CUDAGraphRunner(GraphRunner):
         self.enable_graph = self.check_enable_graph()
 
         self.graph_pool_handle = torch.cuda.graph_pool_handle()
-        self._runner_map: Dict[Any, CUDASingleGraphRunner] = dict()
+        self._runner_map: Dict[Any, AscendSingleGraphRunner] = dict()
         self.has_try_compile_model: bool = False
 
     def check_enable_graph(self):
@@ -331,7 +341,6 @@ class CUDAGraphRunner(GraphRunner):
         """call."""
         if not self.backend_config.eager_mode and get_backend().get_name() == 'cuda':
             self._try_compile_model_once()
-
         enable_graph = self.enable_graph(**kwargs)
 
         if not enable_graph:
@@ -343,7 +352,7 @@ class CUDAGraphRunner(GraphRunner):
         is_decoding = graph_key[1]
         if graph_key not in self._runner_map:
             max_batches = max_tokens if is_decoding else self.max_batches
-            runner = CUDASingleGraphRunner(self.model,
+            runner = AscendSingleGraphRunner(self.model,
                                            max_batches=max_batches,
                                            max_tokens=max_tokens,
                                            num_blocks=self.num_blocks,
@@ -365,6 +374,11 @@ class CUDAGraphRunner(GraphRunner):
         inputs_embeds: torch.Tensor = None,
         context: StepContext = None,
     ):
+        # context.kv_seqlens = context.kv_seqlens.to("npu")
+        # torch._dynamo.mark_static(context.input_ids)
+        # torch._dynamo.mark_static(context.position_ids)
+        
+
         """Prepare inputs."""
         return self.model.prepare_inputs_for_generation(
             past_key_values=past_key_values,
@@ -392,3 +406,6 @@ class CUDAGraphRunner(GraphRunner):
     def get_capture_batch_sizes(self) -> List[int]:
         """Capture batch sizes."""
         return _get_capture_batch_size_impl(self.cache_config.max_batches)
+
+from lmdeploy.pytorch.backends.cuda import graph_runner
+graph_runner.CUDAGraphRunner = AscendGraphRunner
