@@ -362,6 +362,8 @@ def rms_norm(hidden_states: Tensor, weight: Tensor, epsilon: float) -> Tensor:
 
 @register_ops(vendor_ops_registry)
 def silu_and_mul(input_tensor: Tensor, dim: int) -> Tensor:
+    # todo: how to select in torchair-aclgraph ?
+    return torch.ops.npu.npu_swiglu(input_tensor, dim)
     if SocVersion.is_Ascend910():
         return torch.ops.npu.npu_swiglu(input_tensor, dim)
     elif SocVersion.is_Ascend310P():

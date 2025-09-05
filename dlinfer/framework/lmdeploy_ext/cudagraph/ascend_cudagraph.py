@@ -11,6 +11,10 @@ BuffType = Dict[str, Tensor]
 import torch_npu, torchair
 import logging
 
+from torchair import logger
+# logger.setLevel(logging.DEBUG)
+# torch._logging.set_logs(recompiles=True, dynamo=logging.DEBUG, aot=logging.DEBUG, output_code=True, graph_code=True)
+
 
 
 '''
@@ -235,6 +239,11 @@ class AscendSingleGraphRunner:
         self._graph: torch.cuda.CUDAGraph = None
 
         self.torchair_config = torchair.CompilerConfig()
+        # self.torchair_config.debug.graph_dump.type="py"
+        # self.torchair_config.debug.graph_dump.path="./graph_dump"
+        self.torchair_config.debug.aclgraph.disable_reinplace_inplaceable_ops_pass=True
+        self.torchair_config.experimental_config.frozen_parameter = True
+        self.torchair_config.experimental_config.tiling_schedule_optimize = True
         self.torchair_config.mode = "reduce-overhead"
         self.npu_backend = torchair.get_npu_backend(compiler_config=self.torchair_config)
 
@@ -242,16 +251,17 @@ class AscendSingleGraphRunner:
     def capture(self, **kwargs):
         """Capture graph."""
         logger.debug(f'Capturing graph with meta: {self.meta}')
+        # kwargs: dict_keys(['input_ids', 'position_ids', 'past_key_values', 'attn_metadata', 'inputs_embeds'])
         # self.meta.input_buffers = self.model.make_buffers_cudagraph(self.meta, **kwargs)
         # padded_kwargs = self.model.fill_buffers_cudagraph(self.meta, **kwargs)
         context = self.ctx_mgr.current_context()
         # self.model.update_context_cudagraph(self.meta, context)
         current_stream = torch.cuda.current_stream()
-
+        
         # warmup
         # output = self.model(**kwargs)
         self.model = torch.compile(self.model, fullgraph=True, dynamic=True, backend=self.npu_backend)
-        
+        # output = self.model(**kwargs)
         # self._graph = torch.cuda.CUDAGraph()
         # unsafe kernel call in other thread might invalid the capture
         # so we set thread_safe capture mode here.
@@ -265,15 +275,49 @@ class AscendSingleGraphRunner:
     @record_function('forward_cudagraph')
     def forward(self, **kwargs):
         """forward."""
- 
-        num_tokens = kwargs['input_ids'].size(-1)
-        assert self._graph is not None
-        self.model.fill_buffers_cudagraph(self.meta, **kwargs)
-        context = self.ctx_mgr.current_context()
-        self.model.update_context_cudagraph(self.meta, context)
-        self._graph.replay()
+        # kwargs:  <class 'dict'> dict_keys(['input_ids', 'position_ids', 'past_key_values', 'attn_metadata', 'inputs_embeds'])
+
+        attn_metadata = kwargs["attn_metadata"]
+        if attn_metadata.is_decoding:
+            # todo: move to warmup and reduce unnecessary mark_static !!
+            torch._dynamo.mark_static(kwargs["input_ids"])
+            torch._dynamo.mark_static(kwargs["position_ids"])
+
+            if kwargs["inputs_embeds"] is not None:
+                torch._dynamo.mark_static(kwargs["inputs_embeds"])
+            for item in kwargs["past_key_values"]:
+                for sub_item in item:
+                    torch._dynamo.mark_static(sub_item)
+
+            if attn_metadata.kv_start_indices is not None:
+                torch._dynamo.mark_static(attn_metadata.kv_start_indices)
+
+            for x in attn_metadata.attention_mask:
+                torch._dynamo.mark_static(x)
+
+            if attn_metadata.cu_seq_lens_kv is not None:
+                torch._dynamo.mark_static(attn_metadata.cu_seq_lens_kv)
+
+            if attn_metadata.block_offsets is not None:
+                bs, num_block = attn_metadata.block_offsets.shape
+                new_offset = torch.zeros(bs, 512, dtype=attn_metadata.block_offsets.dtype, device=attn_metadata.block_offsets.device)
+                new_offset[:, :num_block].copy_(attn_metadata.block_offsets)
+                attn_metadata.block_offsets = new_offset
+
+                torch._dynamo.mark_static(attn_metadata.block_offsets)
+
+            if attn_metadata.q_start_loc is not None:
+                torch._dynamo.mark_static(attn_metadata.q_start_loc)
+
+            if attn_metadata.q_seqlens is not None:
+                torch._dynamo.mark_static(attn_metadata.q_seqlens)
+
+            attn_metadata.kv_seqlens = attn_metadata.kv_seqlens.to("cpu").tolist()
+
+            if attn_metadata.fill_seqlens is not None:
+                torch._dynamo.mark_static(attn_metadata.fill_seqlens)
         output = self.model(**kwargs)
-        # output = self.meta.output_buffers['logits'][:, :num_tokens]
+        
         return output
 
     def __del__(self):
@@ -374,11 +418,6 @@ class AscendGraphRunner(GraphRunner):
         inputs_embeds: torch.Tensor = None,
         context: StepContext = None,
     ):
-        # context.kv_seqlens = context.kv_seqlens.to("npu")
-        # torch._dynamo.mark_static(context.input_ids)
-        # torch._dynamo.mark_static(context.position_ids)
-        
-
         """Prepare inputs."""
         return self.model.prepare_inputs_for_generation(
             past_key_values=past_key_values,
