@@ -1,7 +1,6 @@
 # Copyright (c) 2024, DeepLink. All rights reserved.
 import math
 import torch
-import torch_npu
 
 from dlinfer.vendor import vendor_ops_registry
 from dlinfer.utils.registry import register_ops
@@ -148,7 +147,7 @@ def incre_flash_attention(
     input_layout: str,
     softmax_scale: Optional[float],
 ) -> Tensor:
-    attn_output = torch_npu.npu_incre_flash_attention(
+    attn_output = torch.ops.npu.npu_incre_flash_attention(
         query,
         key,
         value,
@@ -245,7 +244,7 @@ def paged_decode_attention(
     value_cache = value_cache.view(block_num, block_size, -1)
     scale_value = softmax_scale if softmax_scale else 1.0 / math.sqrt(dim)
     
-    attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+    attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
         query,
         key_cache,
         value_cache,

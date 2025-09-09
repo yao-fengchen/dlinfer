@@ -54,13 +54,14 @@ def AscendCudaGraphMixin_make_buffers_cudagraph(
     input_buffers["kv_seqlens"] = torch.zeros(
         max_batches, dtype=torch.int32, device=device
     )
+    input_buffers["kv_seqlens"] = [0] * max_batches
 
     input_buffers["q_start_loc"] = torch.arange(
         max_batches + 1, dtype=torch.int32, device=device
     )
 
     input_buffers["kv_start_indices"] = -torch.ones(
-        (max_batches, 1), dtype=torch.int64, device=device
+        (max_batches), dtype=torch.int64, device=device
     )
     return input_buffers
 
@@ -91,8 +92,10 @@ def AscendCudaGraphMixin_fill_buffers_cudagraph(
     input_buffers["input_ids"][:, :num_tokens] = input_ids
     input_buffers["position_ids"][:, :num_tokens] = position_ids
     input_buffers["block_offsets"][:batch_size, :num_blocks] = block_offsets
-    input_buffers["q_start_loc"][: batch_size + 1] = q_start_loc
-    input_buffers["q_seqlens"][:batch_size] = q_seqlens
+    # input_buffers["q_start_loc"][: batch_size + 1] = q_start_loc
+    # input_buffers["q_seqlens"][:batch_size] = q_seqlens
+    if not isinstance(kv_seqlens, list):
+        kv_seqlens = kv_seqlens.to("cpu").tolist()
     input_buffers["kv_seqlens"][:batch_size] = kv_seqlens
     input_buffers["kv_start_indices"][:batch_size] = kv_start_indices
 
@@ -108,8 +111,8 @@ def AscendCudaGraphMixin_fill_buffers_cudagraph(
     new_batch_size = next_power_of_2(batch_size)
 
     attn_metadata.block_offsets = input_buffers["block_offsets"][:new_batch_size]
-    attn_metadata.q_start_loc = input_buffers["q_start_loc"][: new_batch_size + 1]
-    attn_metadata.q_seqlens = input_buffers["q_seqlens"][:new_batch_size]
+    # attn_metadata.q_start_loc = input_buffers["q_start_loc"][: new_batch_size + 1]
+    # attn_metadata.q_seqlens = input_buffers["q_seqlens"][:new_batch_size]
     attn_metadata.kv_seqlens = input_buffers["kv_seqlens"][:new_batch_size]
     attn_metadata.kv_start_indices = input_buffers["kv_start_indices"][:new_batch_size]
 
@@ -252,11 +255,11 @@ class AscendSingleGraphRunner:
         """Capture graph."""
         logger.debug(f'Capturing graph with meta: {self.meta}')
         # kwargs: dict_keys(['input_ids', 'position_ids', 'past_key_values', 'attn_metadata', 'inputs_embeds'])
-        # self.meta.input_buffers = self.model.make_buffers_cudagraph(self.meta, **kwargs)
-        # padded_kwargs = self.model.fill_buffers_cudagraph(self.meta, **kwargs)
+        self.meta.input_buffers = self.model.make_buffers_cudagraph(self.meta, **kwargs)
+        padded_kwargs = self.model.fill_buffers_cudagraph(self.meta, **kwargs)
         context = self.ctx_mgr.current_context()
-        # self.model.update_context_cudagraph(self.meta, context)
-        current_stream = torch.cuda.current_stream()
+        self.model.update_context_cudagraph(self.meta, context)
+        # current_stream = torch.cuda.current_stream()
         
         # warmup
         # output = self.model(**kwargs)
@@ -266,57 +269,63 @@ class AscendSingleGraphRunner:
         # unsafe kernel call in other thread might invalid the capture
         # so we set thread_safe capture mode here.
         # with torch.cuda.graph(self._graph, pool=self.pool, stream=current_stream, capture_error_mode='thread_local'):
-        #     output = self.model(**padded_kwargs)
+        output = self.model(**padded_kwargs)
 
-        # output_buffers = dict(logits=output)
-        # self.meta.output_buffers = output_buffers
-        # return output
+        output_buffers = dict(logits=output)
+        self.meta.output_buffers = output_buffers
+        return output
 
     @record_function('forward_cudagraph')
     def forward(self, **kwargs):
         """forward."""
         # kwargs:  <class 'dict'> dict_keys(['input_ids', 'position_ids', 'past_key_values', 'attn_metadata', 'inputs_embeds'])
+        num_tokens = kwargs['input_ids'].size(-1)
+        # assert self._graph is not None
+        self.model.fill_buffers_cudagraph(self.meta, **kwargs)
+        context = self.ctx_mgr.current_context()
+        self.model.update_context_cudagraph(self.meta, context)
 
-        attn_metadata = kwargs["attn_metadata"]
-        if attn_metadata.is_decoding:
-            # todo: move to warmup and reduce unnecessary mark_static !!
-            torch._dynamo.mark_static(kwargs["input_ids"])
-            torch._dynamo.mark_static(kwargs["position_ids"])
+        # attn_metadata = kwargs["attn_metadata"]
+        # if attn_metadata.is_decoding:
+        #     # todo: move to warmup and reduce unnecessary mark_static !!
+        #     torch._dynamo.mark_static(kwargs["input_ids"])
+        #     torch._dynamo.mark_static(kwargs["position_ids"])
 
-            if kwargs["inputs_embeds"] is not None:
-                torch._dynamo.mark_static(kwargs["inputs_embeds"])
-            for item in kwargs["past_key_values"]:
-                for sub_item in item:
-                    torch._dynamo.mark_static(sub_item)
+        #     if kwargs["inputs_embeds"] is not None:
+        #         torch._dynamo.mark_static(kwargs["inputs_embeds"])
+        #     for item in kwargs["past_key_values"]:
+        #         for sub_item in item:
+        #             torch._dynamo.mark_static(sub_item)
 
-            if attn_metadata.kv_start_indices is not None:
-                torch._dynamo.mark_static(attn_metadata.kv_start_indices)
+        #     if attn_metadata.kv_start_indices is not None:
+        #         torch._dynamo.mark_static(attn_metadata.kv_start_indices)
 
-            for x in attn_metadata.attention_mask:
-                torch._dynamo.mark_static(x)
+        #     for x in attn_metadata.attention_mask:
+        #         torch._dynamo.mark_static(x)
 
-            if attn_metadata.cu_seq_lens_kv is not None:
-                torch._dynamo.mark_static(attn_metadata.cu_seq_lens_kv)
+        #     if attn_metadata.cu_seq_lens_kv is not None:
+        #         torch._dynamo.mark_static(attn_metadata.cu_seq_lens_kv)
 
-            if attn_metadata.block_offsets is not None:
-                bs, num_block = attn_metadata.block_offsets.shape
-                new_offset = torch.zeros(bs, 512, dtype=attn_metadata.block_offsets.dtype, device=attn_metadata.block_offsets.device)
-                new_offset[:, :num_block].copy_(attn_metadata.block_offsets)
-                attn_metadata.block_offsets = new_offset
+        #     if attn_metadata.block_offsets is not None:
+        #         bs, num_block = attn_metadata.block_offsets.shape
+        #         new_offset = torch.zeros(bs, 512, dtype=attn_metadata.block_offsets.dtype, device=attn_metadata.block_offsets.device)
+        #         new_offset[:, :num_block].copy_(attn_metadata.block_offsets)
+        #         attn_metadata.block_offsets = new_offset
 
-                torch._dynamo.mark_static(attn_metadata.block_offsets)
+        #         torch._dynamo.mark_static(attn_metadata.block_offsets)
 
-            if attn_metadata.q_start_loc is not None:
-                torch._dynamo.mark_static(attn_metadata.q_start_loc)
+        #     if attn_metadata.q_start_loc is not None:
+        #         torch._dynamo.mark_static(attn_metadata.q_start_loc)
 
-            if attn_metadata.q_seqlens is not None:
-                torch._dynamo.mark_static(attn_metadata.q_seqlens)
+        #     if attn_metadata.q_seqlens is not None:
+        #         torch._dynamo.mark_static(attn_metadata.q_seqlens)
 
-            attn_metadata.kv_seqlens = attn_metadata.kv_seqlens.to("cpu").tolist()
+        #     attn_metadata.kv_seqlens = attn_metadata.kv_seqlens.to("cpu").tolist()
 
-            if attn_metadata.fill_seqlens is not None:
-                torch._dynamo.mark_static(attn_metadata.fill_seqlens)
-        output = self.model(**kwargs)
+        #     if attn_metadata.fill_seqlens is not None:
+        #         torch._dynamo.mark_static(attn_metadata.fill_seqlens)
+        output = self.model(**kwargs)[:, :num_tokens]
+        # output = self.meta.output_buffers['logits'][:, :num_tokens]
         
         return output
 
@@ -395,6 +404,7 @@ class AscendGraphRunner(GraphRunner):
         max_tokens = graph_key[0]
         is_decoding = graph_key[1]
         if graph_key not in self._runner_map:
+            logger.info(f'############## {graph_key=}, {self._runner_map=}')
             max_batches = max_tokens if is_decoding else self.max_batches
             runner = AscendSingleGraphRunner(self.model,
                                            max_batches=max_batches,
