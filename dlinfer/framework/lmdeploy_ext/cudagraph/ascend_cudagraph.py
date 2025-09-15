@@ -280,52 +280,11 @@ class AscendSingleGraphRunner:
         """forward."""
         # kwargs:  <class 'dict'> dict_keys(['input_ids', 'position_ids', 'past_key_values', 'attn_metadata', 'inputs_embeds'])
         num_tokens = kwargs['input_ids'].size(-1)
-        # assert self._graph is not None
         self.model.fill_buffers_cudagraph(self.meta, **kwargs)
         context = self.ctx_mgr.current_context()
         self.model.update_context_cudagraph(self.meta, context)
 
-        # attn_metadata = kwargs["attn_metadata"]
-        # if attn_metadata.is_decoding:
-        #     # todo: move to warmup and reduce unnecessary mark_static !!
-        #     torch._dynamo.mark_static(kwargs["input_ids"])
-        #     torch._dynamo.mark_static(kwargs["position_ids"])
-
-        #     if kwargs["inputs_embeds"] is not None:
-        #         torch._dynamo.mark_static(kwargs["inputs_embeds"])
-        #     for item in kwargs["past_key_values"]:
-        #         for sub_item in item:
-        #             torch._dynamo.mark_static(sub_item)
-
-        #     if attn_metadata.kv_start_indices is not None:
-        #         torch._dynamo.mark_static(attn_metadata.kv_start_indices)
-
-        #     for x in attn_metadata.attention_mask:
-        #         torch._dynamo.mark_static(x)
-
-        #     if attn_metadata.cu_seq_lens_kv is not None:
-        #         torch._dynamo.mark_static(attn_metadata.cu_seq_lens_kv)
-
-        #     if attn_metadata.block_offsets is not None:
-        #         bs, num_block = attn_metadata.block_offsets.shape
-        #         new_offset = torch.zeros(bs, 512, dtype=attn_metadata.block_offsets.dtype, device=attn_metadata.block_offsets.device)
-        #         new_offset[:, :num_block].copy_(attn_metadata.block_offsets)
-        #         attn_metadata.block_offsets = new_offset
-
-        #         torch._dynamo.mark_static(attn_metadata.block_offsets)
-
-        #     if attn_metadata.q_start_loc is not None:
-        #         torch._dynamo.mark_static(attn_metadata.q_start_loc)
-
-        #     if attn_metadata.q_seqlens is not None:
-        #         torch._dynamo.mark_static(attn_metadata.q_seqlens)
-
-        #     attn_metadata.kv_seqlens = attn_metadata.kv_seqlens.to("cpu").tolist()
-
-        #     if attn_metadata.fill_seqlens is not None:
-        #         torch._dynamo.mark_static(attn_metadata.fill_seqlens)
         output = self.model(**kwargs)[:, :num_tokens]
-        # output = self.meta.output_buffers['logits'][:, :num_tokens]
         
         return output
 
@@ -345,6 +304,8 @@ class AscendGraphRunner(GraphRunner):
         self.num_blocks = cache_config.num_gpu_blocks
 
         self.enable_graph = self.check_enable_graph()
+        import dlinfer.graph
+        dlinfer.graph.config.enable_graph_mode = True
 
         self.graph_pool_handle = torch.cuda.graph_pool_handle()
         self._runner_map: Dict[Any, AscendSingleGraphRunner] = dict()
