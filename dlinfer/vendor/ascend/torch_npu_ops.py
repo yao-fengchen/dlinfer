@@ -372,13 +372,8 @@ def silu_and_mul(input_tensor: Tensor, dim: int) -> Tensor:
 
 @register_ops(vendor_ops_registry)
 def moe_gating_topk_softmax(router_logits: Tensor, topk: int) -> Tuple[Tensor, Tensor]:
-    routing_weights = router_logits.new_empty((*router_logits.shape[:-1], topk))
-    selected_experts = router_logits.new_empty(
-        (*router_logits.shape[:-1], topk), dtype=torch.int32
-    )
-    selected_idx = torch.empty_like(selected_experts)
-    routing_weights, selected_idx = torch.ops.npu_ext.npu_moe_gating_topk_softmax(
-        router_logits, None, topk, routing_weights, selected_experts, selected_idx
+    routing_weights, selected_idx, _ = torch.ops.npu.npu_moe_gating_top_k_softmax(
+        router_logits, None, topk
     )
     return routing_weights, selected_idx.to(torch.int64)
 
