@@ -1,6 +1,7 @@
 # Copyright (c) 2024, DeepLink. All rights reserved.
 import math
 import torch
+import torch_npu
 
 from dlinfer.vendor import vendor_ops_registry
 from dlinfer.utils.registry import register_ops
@@ -169,14 +170,9 @@ def fill_kv_cache(
     v_scales_zeros: Sequence[Optional[Tensor]],
     quant_bits: int,
 ) -> Tuple[Tensor, Tensor]:
-    _, head, dim = key.shape
-    block_num, block_size = key_cache.shape[:2]
-    block_total = block_num * block_size
-
     # only support contiguous k,v
     key = key.contiguous()
     value = value.contiguous()
-    kv_indices = kv_indices.view(-1, 1)
 
     if quant_bits == 8:
 
@@ -189,10 +185,12 @@ def fill_kv_cache(
         key = quant_int8(key, k_scales_zeros[0], k_scales_zeros[1])
         value = quant_int8(value, v_scales_zeros[0], v_scales_zeros[1])
 
-    key_cache_reshaped = key_cache.view(block_total, head, dim)
-    value_cache_reshaped = value_cache.view(block_total, head, dim)
-    torch.ops.npu.npu_scatter_nd_update_(key_cache_reshaped, kv_indices, key)
-    torch.ops.npu.npu_scatter_nd_update_(value_cache_reshaped, kv_indices, value)
+    torch_npu._npu_reshape_and_cache(
+        key=key,
+        value=value,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        slot_indices=kv_indices.to(torch.int32))
     return key_cache, value_cache
 
 
