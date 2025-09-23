@@ -294,7 +294,7 @@ class AscendSingleGraphRunner:
         self.model.fill_buffers_cudagraph(self.meta, **kwargs)
         context = self.ctx_mgr.current_context()
         self.model.update_context_cudagraph(self.meta, context)
-        self._graph.update(cpu_update_input=[{"kv_seqlens": self.meta.input_buffers["kv_seqlens"]}])
+        self._graph.update(cpu_update_input=[{"actual_seq_lengths_kv": self.meta.input_buffers["kv_seqlens"]}])
         self._graph.replay()
 
         output = self.meta.output_buffers['logits'][:, :num_tokens]
@@ -378,6 +378,7 @@ class AscendGraphRunner(GraphRunner):
         max_tokens = graph_key[0]
         is_decoding = graph_key[1]
         if graph_key not in self._runner_map:
+            logger.warning(f'Creating new graph runner for key: {graph_key=}')
             max_batches = max_tokens if is_decoding else self.max_batches
             runner = AscendSingleGraphRunner(self.model,
                                             max_batches=max_batches,
@@ -387,8 +388,8 @@ class AscendGraphRunner(GraphRunner):
                                             pool=self.graph_pool_handle,
                                             model_config=self.model_config,
                                             device=self.device)
-            runner.capture(**kwargs)
             self._runner_map[graph_key] = runner
+            runner.capture(**kwargs)
         else:
             runner = self._runner_map[graph_key]
         output = runner.forward(**kwargs)
