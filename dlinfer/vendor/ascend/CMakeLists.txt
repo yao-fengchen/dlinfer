@@ -11,7 +11,7 @@ set(CSRC_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/torch_npu_utils.cpp
 )
 
-if(${Torch_npu_VERSION_HIGHER_THAN_231})
+if(${Torch_npu_GT_231})
     list(APPEND CSRC_FILES ${CMAKE_CURRENT_SOURCE_DIR}/csrc/torch_npu_symbol_fix.cpp)
 endif()
 
@@ -35,6 +35,13 @@ if(TORCH_VERSION MATCHES "^2.6.0")
     target_compile_definitions(
         ${PROJECT_NAME} PUBLIC
         TORCH_VERSION_2_6_0_DEV
+    )
+endif()
+
+if (Torch_npu_GT_260 STREQUAL "TRUE")
+    target_compile_definitions(
+        ${PROJECT_NAME} PUBLIC
+        Torch_npu_GT_260
     )
 endif()
 

@@ -28,7 +28,14 @@ execute_process(
     COMMAND python -c "import torch_npu; from packaging import version; \
     torch_npu_version = version.parse(torch_npu.__version__); \
     print('TRUE' if torch_npu_version > version.Version('2.3.1') else 'FALSE', end='')"
-    OUTPUT_VARIABLE Torch_npu_VERSION_HIGHER_THAN_231
+    OUTPUT_VARIABLE Torch_npu_GT_231
+)
+
+execute_process(
+    COMMAND python -c "import torch_npu; from packaging import version; \
+    torch_npu_version = version.parse(torch_npu.__version__); \
+    print('TRUE' if torch_npu_version > version.Version('2.6.0') else 'FALSE', end='')"
+    OUTPUT_VARIABLE Torch_npu_GT_260
 )
 
 find_package(Torch REQUIRED)

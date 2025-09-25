@@ -27,7 +27,7 @@ void record_mem_hbm_ecc_error() {
         "Please check your environment setup.");
 }
 
-#if defined(TORCH_VERSION_2_6_0_DEV)
+#if defined(TORCH_VERSION_2_6_0_DEV) or defined(Torch_npu_GT_260)
 std::string handleDeviceError(int errorCode) {
     throw std::runtime_error(
         "Dlinfer handleDeviceError should not be called. "

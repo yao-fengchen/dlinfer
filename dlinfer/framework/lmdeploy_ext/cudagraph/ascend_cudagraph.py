@@ -388,8 +388,8 @@ class AscendGraphRunner(GraphRunner):
                                             pool=self.graph_pool_handle,
                                             model_config=self.model_config,
                                             device=self.device)
-            self._runner_map[graph_key] = runner
             runner.capture(**kwargs)
+            self._runner_map[graph_key] = runner
         else:
             runner = self._runner_map[graph_key]
         output = runner.forward(**kwargs)
