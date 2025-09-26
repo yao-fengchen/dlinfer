@@ -294,6 +294,7 @@ class AscendSingleGraphRunner:
         self.model.fill_buffers_cudagraph(self.meta, **kwargs)
         context = self.ctx_mgr.current_context()
         self.model.update_context_cudagraph(self.meta, context)
+        torch.npu.synchronize()
         self._graph.update(cpu_update_input=[{"actual_seq_lengths_kv": self.meta.input_buffers["kv_seqlens"]}])
         self._graph.replay()
 
