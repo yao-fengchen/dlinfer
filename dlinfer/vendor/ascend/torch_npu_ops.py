@@ -197,7 +197,7 @@ def get_cache_len(cache: Tensor):
 
 
 @register_ops(vendor_ops_registry)
-def paged_decode_attention(
+def paged_decode_attention_1(
     query: Tensor,
     key_cache: Tensor,
     value_cache: Tensor,
