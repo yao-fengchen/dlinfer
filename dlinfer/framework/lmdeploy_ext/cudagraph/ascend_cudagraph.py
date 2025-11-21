@@ -290,7 +290,6 @@ class AscendSingleGraphRunner:
 
 class AscendGraphRunner(GraphRunner):
     """Cuda graph runner."""
-    is_capture = False
 
     capturing = False
 
@@ -346,7 +345,6 @@ class AscendGraphRunner(GraphRunner):
 
     def __call__(self, **kwargs):
         """call."""
-        AscendGraphRunner.is_capture
         enable_graph = self.enable_graph(**kwargs)
 
         if not enable_graph:
