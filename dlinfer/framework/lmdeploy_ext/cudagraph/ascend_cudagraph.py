@@ -48,10 +48,7 @@ def AscendCudaGraphMixin_make_buffers_cudagraph(
         max_batches, dtype=torch.int32, device=device
     )
 
-    # input_buffers["kv_seqlens"] = [0] * max_batches
-    input_buffers["kv_seqlens"] = torch.ones(
-        max_batches, dtype=torch.int32
-    )
+    input_buffers["kv_seqlens"] = torch.ones(max_batches, dtype=torch.int32)
 
     input_buffers["q_start_loc"] = torch.arange(
         max_batches + 1, dtype=torch.int32, device=device
@@ -258,71 +255,14 @@ class AscendSingleGraphRunner:
     @record_function("forward_cudagraph")
     def forward(self, **kwargs):
         """forward."""
-        # if torch.distributed.get_rank() == 0:
-        #     logger.error(f"############### begin of forward")
         num_tokens = kwargs["input_ids"].size(-1)
         assert self._graph is not None
         self.model.fill_buffers_cudagraph(self.meta, **kwargs)
         context = self.ctx_mgr.current_context()
         self.model.update_context_cudagraph(self.meta, context)
-        # logger.error(f"########### torch.npu.synchronize() 0")
-        # graph_params = get_graph_params()
-        # attn_params = graph_params.attn_params[self.max_tokens]
-        # (
-        #     query,
-        #     key_cache,
-        #     value_cache,
-        #     num_kv_heads,
-        #     num_heads,
-        #     scale,
-        #     block_table,
-        #     seq_lens,
-        #     output,
-        # ) = attn_params
-        # seq_lens = self.meta.input_buffers["kv_seqlens"]
-        # logger.error(f"### {self.max_tokens=}, {query.shape=}, {key_cache.shape=}, {value_cache.shape=}, {num_kv_heads=}, {num_heads=}, {scale=}, {block_table=}, {seq_lens=}")
-        # torch.npu.synchronize()
-        # logger.error(f"########### torch.npu.synchronize() 1")
-        # self._graph.replay()
-        graph_params = get_graph_params()
-        for param, handle, event in zip(
-                graph_params.attn_params[self.max_tokens],
-                graph_params.handles[self.max_tokens],
-                graph_params.events[self.max_tokens],
-        ):
-            (
-                query,
-                key_cache,
-                value_cache,
-                num_kv_heads,
-                num_heads,
-                scale,
-                block_table,
-                seq_lens,
-                output,
-            ) = param
-            seq_lens = self.meta.input_buffers["kv_seqlens"]
-            with torch.npu.stream(self.update_stream):
-                torch.npu.graph_task_update_begin(self.update_stream, handle)
-                # torch.npu.graph_task_group_begin(stream)
-                torch_npu._npu_paged_attention(query=query,
-                                            key_cache=key_cache,
-                                            value_cache=value_cache,
-                                            num_kv_heads=num_kv_heads,
-                                            num_heads=num_heads,
-                                            scale_value=scale,
-                                            block_table=block_table,
-                                            context_lens=seq_lens,
-                                            out=output)
-                torch.npu.graph_task_update_end(self.update_stream)
-                # torch.npu.graph_task_group_end(stream)
-                event.record(self.update_stream)
-
+        update_attn_params(self.update_stream, self.meta, self.max_tokens)
         self._graph.replay()
-        # torch.npu.synchronize()
-        # logger.error(f"########### after torch.npu.synchronize()")
         output = self.meta.output_buffers["logits"][:, :num_tokens]
-        # logger.error(f"############### {output=}")
         return output
 
     def reset(self):
@@ -351,6 +291,8 @@ class AscendSingleGraphRunner:
 class AscendGraphRunner(GraphRunner):
     """Cuda graph runner."""
     is_capture = False
+
+    capturing = False
 
     def __init__(
         self,
@@ -428,8 +370,7 @@ class AscendGraphRunner(GraphRunner):
                 device=self.device,
                 update_stream=self.update_stream,
             )
-            AscendGraphRunner.is_capture = True
-            # logger.error(f"############# capture {graph_key=}")
+            AscendGraphRunner.capturing = True
             runner.capture(**kwargs)
             self._runner_map[graph_key] = runner
         else:
@@ -509,14 +450,10 @@ def set_graph_params(aclgraph_capture_sizes: set[int]):
     if _graph_params is not None:
         raise ValueError("Graph parameters have already been set!")
     _graph_params = GraphParams(
-        {size: []
-         for size in aclgraph_capture_sizes},
-        {size: None
-         for size in aclgraph_capture_sizes},
-        {size: []
-         for size in aclgraph_capture_sizes},
-        {size: []
-         for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: None for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
     )
 
 
@@ -547,41 +484,28 @@ def clear_graph_params():
     finally:
         _graph_params = None
 
-def update_attn_params(update_stream, forward_context, runtime_shape):
+def update_attn_params(update_stream, forward_meta, runtime_size):
     graph_params = get_graph_params()
-    # For Qwen3-next, since the kv_cache_config has already categorized
-    # linear_attn and self_attn, the attn_metadata is first arranged with
-    # self_attn followed by linear_attn. Therefore, using zip directly
-    # filters out the update operations for linear_attn.
-    with torch.npu.stream(update_stream):
-        for key, param, handle, event in zip(
-                forward_context.attn_metadata,
-                graph_params.attn_params[runtime_shape],
-                graph_params.handles[runtime_shape],
-                graph_params.events[runtime_shape],
-        ):
-            (
-                query,
-                key_cache,
-                value_cache,
-                num_kv_heads,
-                num_heads,
-                scale,
-                block_table,
-                seq_lens,
-                output,
-            ) = param
-            seq_lens = forward_context.attn_metadata[key].seq_lens
-
-            # When using FULL_DECODE_ONLY, there are some rare bugs for FULL_DECODE_ONLY
-            # mode with GQA. This is triggered by getting workspace for _npu_paged_attention
-            # in torch_npu. On some rare cases, _npu_paged_attention with smaller seq_lens
-            # might encounter a bigger workspace, while currently we use max_model_len to
-            # calculate max workspace in capturing. So additional get_workspace is added
-            # here to avoid such bugs.
-            # TODO(Angazenn): we will remove this once _npu_paged_attention is fully
-            # replaced by npu_fused_infer_attention_score which does not contain such bugs.
-            workspace = torch_npu._npu_paged_attention_get_workspace(
+    for param, handle, event in zip(
+        graph_params.attn_params[runtime_size],
+        graph_params.handles[runtime_size],
+        graph_params.events[runtime_size],
+    ):
+        (
+            query,
+            key_cache,
+            value_cache,
+            num_kv_heads,
+            num_heads,
+            scale,
+            block_table,
+            seq_lens,
+            output,
+        ) = param
+        seq_lens = forward_meta.input_buffers["kv_seqlens"]
+        with torch.npu.stream(update_stream):
+            torch.npu.graph_task_update_begin(update_stream, handle)
+            torch.ops.atb._npu_paged_attention(
                 query=query,
                 key_cache=key_cache,
                 value_cache=value_cache,
@@ -590,18 +514,7 @@ def update_attn_params(update_stream, forward_context, runtime_shape):
                 scale_value=scale,
                 block_table=block_table,
                 context_lens=seq_lens,
-                out=output)
-            torch.npu.graph_task_update_begin(update_stream, handle)
-            torch_npu._npu_paged_attention(query=query,
-                                           key_cache=key_cache,
-                                           value_cache=value_cache,
-                                           num_kv_heads=num_kv_heads,
-                                           num_heads=num_heads,
-                                           scale_value=scale,
-                                           block_table=block_table,
-                                           context_lens=seq_lens,
-                                           out=output,
-                                           workspace=workspace)
+                out=output,
+            )
             torch.npu.graph_task_update_end(update_stream)
-
             event.record(update_stream)

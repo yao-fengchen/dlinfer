@@ -8,10 +8,10 @@ from dlinfer.vendor import vendor_ops_registry
 from dlinfer.utils.registry import register_ops
 from dlinfer.utils.type_annotation import Tensor, Optional, Sequence, Tuple
 from .utils import SocVersion
-from dlinfer.framework.lmdeploy_ext.cudagraph import ascend_cudagraph
-from dlinfer.framework.lmdeploy_ext.cudagraph.ascend_cudagraph import get_graph_params
-from lmdeploy.utils import get_logger
-logger = get_logger('dlinfer')
+from dlinfer.framework.lmdeploy_ext.cudagraph.ascend_cudagraph import (
+    AscendGraphRunner,
+    get_graph_params,
+)
 
 __all__ = [
     "add_rms_norm",
@@ -96,15 +96,17 @@ def prefill_attention(
     value = value.contiguous()
     scale_value = softmax_scale if softmax_scale else 1.0 / math.sqrt(query.shape[-1])
     if SocVersion.is_Ascend910():
-        torch.ops.atb._npu_flash_attention(query=query,
-                                            key=key,
-                                            value=value,
-                                            mask=attn_mask[0].to(query.dtype),
-                                            seq_len=q_seq_len,
-                                            scale_value=scale_value,
-                                            num_heads=num_q_heads,
-                                            num_kv_heads=num_kv_heads,
-                                            out=attn_output)
+        torch.ops.atb._npu_flash_attention(
+            query=query,
+            key=key,
+            value=value,
+            mask=attn_mask[0].to(query.dtype),
+            seq_len=q_seq_len,
+            scale_value=scale_value,
+            num_heads=num_q_heads,
+            num_kv_heads=num_kv_heads,
+            out=attn_output,
+        )
     elif SocVersion.is_Ascend310P():
         # Used for Qwen2.5-VL model vision block
         query = query.unsqueeze(0)
@@ -197,85 +199,6 @@ def get_cache_len(cache: Tensor):
 
 
 @register_ops(vendor_ops_registry)
-def paged_decode_attention_1(
-    query: Tensor,
-    key_cache: Tensor,
-    value_cache: Tensor,
-    block_table: Optional[Tensor],
-    block_size: int,
-    kv_seq_len: Tensor,
-    max_kv_seq_len: int,
-    num_q_heads: int,
-    num_kv_heads: int,
-    softmax_scale: Optional[float],
-    alibi_slopes: Optional[Sequence[float]],
-    attn_output: Optional[Tensor],
-    kv_scales: Optional[Tensor],
-    kv_zeros: Optional[Tensor],
-    quant_bits: Optional[int],
-) -> Tensor:
-    if alibi_slopes is not None:
-        raise RuntimeError(
-            "paged_decode_attention does not " "support alibi_slopes yet"
-        )
-    if isinstance(block_table, torch.Tensor) and block_table.dtype != torch.int32:
-        block_table = block_table.to(torch.int32)
-
-    bs, _, dim = query.shape
-    block_num = key_cache.size(0)
-    query = query.contiguous()
-    attn_output = attn_output.contiguous()
-    query = query.view(bs, 1, num_q_heads * dim)
-    key_cache = key_cache.view(block_num, block_size, -1)
-    value_cache = value_cache.view(block_num, block_size, -1)
-    scale_value = softmax_scale if softmax_scale else 1.0 / math.sqrt(dim)
-
-    attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
-        query,
-        key_cache,
-        value_cache,
-        pse_shift=None,
-        atten_mask=None,
-        actual_seq_lengths=None,
-        actual_seq_lengths_kv=kv_seq_len,
-        dequant_scale1=None,
-        quant_scale1=None,
-        dequant_scale2=None,
-        quant_scale2=None,
-        quant_offset2=None,
-        antiquant_scale=kv_scales,
-        antiquant_offset=kv_zeros,
-        block_table=block_table,
-        query_padding_size=None,
-        kv_padding_size=None,
-        key_antiquant_scale=None,
-        key_antiquant_offset=None,
-        value_antiquant_scale=None,
-        value_antiquant_offset=None,
-        key_shared_prefix=None,
-        value_shared_prefix=None,
-        actual_shared_prefix_len=None,
-        query_rope=None,
-        key_rope=None,
-        key_rope_antiquant_scale=None,
-        num_heads=num_q_heads,
-        scale=scale_value,
-        pre_tokens=2147483647,
-        next_tokens=2147483647,
-        input_layout="BSH",
-        num_key_value_heads=num_kv_heads,
-        sparse_mode=0,
-        inner_precise=0,
-        block_size=block_size,
-        antiquant_mode=0,
-        softmax_lse_flag=False,
-        key_antiquant_mode=0,
-        value_antiquant_mode=0,
-    )
-    return attn_output
-
-
-@register_ops(vendor_ops_registry)
 def paged_decode_attention(
     query: Tensor,
     key_cache: Tensor,
@@ -300,48 +223,33 @@ def paged_decode_attention(
     if isinstance(block_table, torch.Tensor) and block_table.dtype != torch.int32:
         block_table = block_table.to(torch.int32)
 
-    bs, _, dim = query.shape
-    block_num = key_cache.size(0)
     query = query.contiguous()
     attn_output = attn_output.contiguous()
-    scale_value = softmax_scale if softmax_scale else 1.0 / math.sqrt(dim)
-    # logger.error(f'############### {query.shape=}')
-    if ascend_cudagraph.AscendGraphRunner.is_capture:
+    scale_value = softmax_scale if softmax_scale else 1.0 / math.sqrt(query.shape[-1])
+    if AscendGraphRunner.capturing:
         kv_seq_len = kv_seq_len
         graph_params = get_graph_params()
         num_tokens = query.shape[0]
-        # workspace = graph_params.workspaces.get(num_tokens)
-        # if workspace is None:
-        #     workspace = torch_npu._npu_paged_attention_get_workspace(
-        #                         query=query,
-        #                         key_cache=key_cache,
-        #                         value_cache=value_cache,
-        #                         num_kv_heads=num_kv_heads,
-        #                         num_heads=num_q_heads,
-        #                         scale_value=scale_value,
-        #                         block_table=block_table,
-        #                         context_lens=kv_seq_len,
-        #                         out=attn_output)
-            # ascend_cudagraph.update_graph_params_workspaces(num_tokens, workspace)
-        stream = torch_npu.npu.current_stream()
+        stream = torch.npu.current_stream()
         event = torch.npu.ExternalEvent()
         event.wait(stream)
         event.reset(stream)
         graph_params.events[num_tokens].append(event)
-        graph_params.attn_params[num_tokens].append((
-            query,
-            key_cache,
-            value_cache,
-            num_kv_heads,
-            num_q_heads,
-            scale_value,
-            block_table,
-            kv_seq_len,
-            attn_output,
-        ))
+        graph_params.attn_params[num_tokens].append(
+            (
+                query,
+                key_cache,
+                value_cache,
+                num_kv_heads,
+                num_q_heads,
+                scale_value,
+                block_table,
+                kv_seq_len,
+                attn_output,
+            )
+        )
         torch.npu.graph_task_group_begin(stream)
-        # torch.ops.atb._npu_paged_attention(
-        torch_npu._npu_paged_attention(
+        torch.ops.atb._npu_paged_attention(
             query=query,
             key_cache=key_cache,
             value_cache=value_cache,
@@ -350,13 +258,12 @@ def paged_decode_attention(
             scale_value=scale_value,
             block_table=block_table,
             context_lens=kv_seq_len,
-            out=attn_output)
+            out=attn_output,
+        )
         handle = torch.npu.graph_task_group_end(stream)
         graph_params.handles[num_tokens].append(handle)
-        # ascend_cudagraph.is_capture = False
     else:
-        # torch.ops.atb._npu_paged_attention(
-        torch_npu._npu_paged_attention(
+        torch.ops.atb._npu_paged_attention(
             query=query,
             key_cache=key_cache,
             value_cache=value_cache,
@@ -365,7 +272,8 @@ def paged_decode_attention(
             scale_value=scale_value,
             block_table=block_table,
             context_lens=kv_seq_len,
-            out=attn_output)
+            out=attn_output,
+        )
     return attn_output
 
 
