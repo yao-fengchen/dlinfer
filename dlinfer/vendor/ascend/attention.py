@@ -17,6 +17,7 @@ def decode_attention(
     scale_value: float,
     block_table: Tensor,
     block_size: int,
+    q_seq_len: Tensor,
     kv_seq_len: Tensor,
     softmax_scale: float,
     attn_output: Tensor,
@@ -62,25 +63,27 @@ def decode_attention(
         block_num = key_cache.size(0)
         query = query.contiguous()
         attn_output = attn_output.contiguous()
-        query = query.view(bs, 1, num_q_heads * dim)
+        # query = query.view(bs, 1, num_q_heads * dim)
         key_cache = key_cache.view(block_num, block_size, -1)
         value_cache = value_cache.view(block_num, block_size, -1)
         scale_value = softmax_scale if softmax_scale else 1.0 / math.sqrt(dim)
+        softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
 
-        attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
+        torch.ops.npu.npu_fused_infer_attention_score(
             query=query,
             key=key_cache,
             value=value_cache,
             atten_mask=None,
             block_table=block_table,
-            input_layout="BSH",
+            input_layout="TND",
             block_size=block_size,
-            actual_seq_lengths=None,
+            actual_seq_lengths=q_seq_len,
             actual_seq_lengths_kv=kv_seq_len,
             num_key_value_heads=num_kv_heads,
             num_heads=num_q_heads,
             scale=scale_value,
             sparse_mode=0,
+            out=[attn_output, softmax_lse],
         )
     else:
         torch.ops.atb._npu_paged_attention(
@@ -104,6 +107,7 @@ def decode_attention_mla(
     num_q_heads: int,
     scale_value: float,
     block_table: Tensor,
+    q_seq_len: Tensor,
     kv_seq_len: Tensor,
     mla_vheadsize: int,
     attn_output: Tensor,
